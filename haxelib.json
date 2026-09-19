@@ -1,15 +1,22 @@
 {
     "name": "hl_compile",
-    "url": "https://github.com/jasononeil/useless/",
+    "url": "https://github.com/JonkIsKindaCool/hl_compile",
     "license": "MIT",
     "tags": [
-        "cross",
-        "useless"
+        "hashlink",
+        "hlc",
+        "build",
+        "webassembly",
+        "emscripten",
+        "cross"
     ],
-    "description": "This library is useless in the same way on every platform.",
+    "description": "Builds HashLink/C programs into native executables or WebAssembly straight from the Haxe compiler.",
     "version": "1.0.0",
-    "releasenote": "Initial release, everything is working correctly.",
+    "releasenote": "Initial release: HashLink/C build pipeline for Windows, Linux and WebAssembly, with static and dynamic native libraries.",
     "contributors": [
-        "Juraj"
-    ]
+        "JonkIsKindaCool"
+    ],
+    "dependencies": {
+        "hxcpp": ""
+    }
 }
