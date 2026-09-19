@@ -275,10 +275,6 @@ Because it is a plain forward to the linker, the same mechanism is how you enabl
   unless the program yields to the browser (Emscripten's main-loop API, or `-sASYNCIFY`). No such flag is
   added for you.
 - `-pthread` is not enabled, so programs that spawn HashLink threads will not work.
-- OpenGL is WebGL 2 (a GLES 3.0 subset): desktop-GL loaders and `#version 330 core` shaders need adapting
-  (`#version 300 es`).
-- Emscripten provides its own GLFW implementation (`-sUSE_GLFW=3`), so the desktop GLFW sources are not
-  compiled for this target; parts of the API may be missing.
 
 ## How it works (backend)
 
