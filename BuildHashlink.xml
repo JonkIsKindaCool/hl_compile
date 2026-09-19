@@ -1,0 +1,217 @@
+<xml>
+    <set name="HXCPP_API_LEVEL" value="400" />
+
+    <include name="${HXCPP}/build-tool/BuildCommon.xml" />
+
+    <set name="HL_ROOT" value="hashlink" />
+    <set name="HL_SRC" value="${HL_ROOT}/src" />
+    <set name="HL_INCLUDE" value="${HL_ROOT}/src" />
+    <set name="PCRE_SRC" value="${HL_ROOT}/include/pcre" />
+
+    <files id="pcre_sources">
+        <depend name="${PCRE_SRC}" />
+
+        <file name="${PCRE_SRC}/pcre2_auto_possess.c" />
+        <file name="${PCRE_SRC}/pcre2_chartables.c" />
+        <file name="${PCRE_SRC}/pcre2_compile.c" />
+        <file name="${PCRE_SRC}/pcre2_config.c" />
+        <file name="${PCRE_SRC}/pcre2_context.c" />
+        <file name="${PCRE_SRC}/pcre2_convert.c" />
+        <file name="${PCRE_SRC}/pcre2_dfa_match.c" />
+        <file name="${PCRE_SRC}/pcre2_error.c" />
+        <file name="${PCRE_SRC}/pcre2_extuni.c" />
+        <file name="${PCRE_SRC}/pcre2_find_bracket.c" />
+        <file name="${PCRE_SRC}/pcre2_jit_compile.c" />
+        <file name="${PCRE_SRC}/pcre2_maketables.c" />
+        <file name="${PCRE_SRC}/pcre2_match_data.c" />
+        <file name="${PCRE_SRC}/pcre2_match.c" />
+        <file name="${PCRE_SRC}/pcre2_newline.c" />
+        <file name="${PCRE_SRC}/pcre2_ord2utf.c" />
+        <file name="${PCRE_SRC}/pcre2_pattern_info.c" />
+        <file name="${PCRE_SRC}/pcre2_script_run.c" />
+        <file name="${PCRE_SRC}/pcre2_serialize.c" />
+        <file name="${PCRE_SRC}/pcre2_string_utils.c" />
+        <file name="${PCRE_SRC}/pcre2_study.c" />
+        <file name="${PCRE_SRC}/pcre2_substitute.c" />
+        <file name="${PCRE_SRC}/pcre2_substring.c" />
+        <file name="${PCRE_SRC}/pcre2_tables.c" />
+        <file name="${PCRE_SRC}/pcre2_ucd.c" />
+        <file name="${PCRE_SRC}/pcre2_valid_utf.c" />
+        <file name="${PCRE_SRC}/pcre2_xclass.c" />
+
+        <compilerflag value="-I${PCRE_SRC}" />
+        <compilerflag value="-DHAVE_CONFIG_H" />
+        <compilerflag value="-DPCRE2_STATIC" />
+        <compilerflag value="-DPCRE2_CODE_UNIT_WIDTH=16" />
+    </files>
+
+    <files id="hashlink_sources">
+        <depend name="${HL_INCLUDE}/hl.h" />
+
+        <compilerflag value="-DLIBHL_EXPORTS" />
+        <compilerflag value="-DHL_MAKE_STATIC" />
+
+        <file name="${HL_SRC}/gc.c" />
+
+        <file name="${HL_SRC}/std/array.c" />
+        <file name="${HL_SRC}/std/buffer.c" />
+        <file name="${HL_SRC}/std/bytes.c" />
+        <file name="${HL_SRC}/std/cast.c" />
+        <file name="${HL_SRC}/std/date.c" />
+        <file name="${HL_SRC}/std/error.c" />
+        <file name="${HL_SRC}/std/debug.c" />
+        <file name="${HL_SRC}/std/file.c" />
+        <file name="${HL_SRC}/std/fun.c" />
+        <file name="${HL_SRC}/std/maps.c" />
+        <file name="${HL_SRC}/std/math.c" />
+        <file name="${HL_SRC}/std/obj.c" />
+        <file name="${HL_SRC}/std/random.c" />
+        <file name="${HL_SRC}/std/regexp.c" />
+        <file name="${HL_SRC}/std/socket.c" />
+        <file name="${HL_SRC}/std/string.c" />
+        <file name="${HL_SRC}/std/sys.c" />
+        <file name="${HL_SRC}/std/types.c" />
+        <file name="${HL_SRC}/std/ucs2.c" />
+        <file name="${HL_SRC}/std/thread.c" />
+        <file name="${HL_SRC}/std/process.c" />
+        <file name="${HL_SRC}/std/track.c" />
+
+        <compilerflag value="-I${HL_INCLUDE}" />
+        <compilerflag value="-I${PCRE_SRC}" />
+        <compilerflag value="-DLIBHL_EXPORTS" />
+        <compilerflag value="-DHAVE_CONFIG_H" />
+        <compilerflag value="-DPCRE2_STATIC" />
+        <compilerflag value="-DPCRE2_CODE_UNIT_WIDTH=16" />
+
+        <section if="windows">
+            <compilerflag value="-D_CRT_SECURE_NO_WARNINGS" />
+
+            <section if="HXCPP_M64">
+                <compilerflag value="-DHL_64" />
+            </section>
+            <section unless="HXCPP_M64">
+                <error value="HashLink on Windows requires 64 bits. Compile with: haxelib run hxcpp BuildHashlink.xml -DHXCPP_M64" />
+            </section>
+        </section>
+
+        <section if="linux">
+            <compilerflag value="-DHL_LINUX" />
+            <section if="HXCPP_M64">
+                <compilerflag value="-DHL_64" />
+            </section>
+            <section if="HXCPP_M32">
+                <compilerflag value="-m32" />
+                <linkerflag value="-m32" />
+            </section>
+            <section if="HXCPP_ARM64">
+                <compilerflag value="-DHL_64" />
+            </section>
+        </section>
+
+        <section if="mac">
+            <compilerflag value="-DHL_MAC" />
+            <section if="HXCPP_M64">
+                <compilerflag value="-DHL_64" />
+            </section>
+            <section if="HXCPP_ARM64">
+                <compilerflag value="-DHL_64" />
+            </section>
+        </section>
+
+        <section if="iphoneos">
+            <compilerflag value="-DHL_IOS" />
+            <compilerflag value="-DHL_MAC" />
+            <section if="HXCPP_ARM64">
+                <compilerflag value="-DHL_64" />
+            </section>
+        </section>
+
+        <section if="iphonesim">
+            <compilerflag value="-DHL_IOS" />
+            <compilerflag value="-DHL_MAC" />
+            <compilerflag value="-DHL_64" />
+        </section>
+
+        <section if="android">
+            <compilerflag value="-DHL_ANDROID" />
+            <compilerflag value="-DHL_LINUX" />
+            <section if="HXCPP_ARM64">
+                <compilerflag value="-DHL_64" />
+            </section>
+            <section if="HXCPP_M64">
+                <compilerflag value="-DHL_64" />
+            </section>
+        </section>
+    </files>
+
+    <set name="OUT_ARCH" value="unknown" />
+
+    <section if="windows">
+        <set name="OUT_ARCH" value="Windows64" />
+    </section>
+
+    <section if="linux">
+        <set name="OUT_ARCH" value="Linux64" />
+        <section if="HXCPP_M32">
+            <set name="OUT_ARCH" value="Linux32" />
+        </section>
+        <section if="HXCPP_ARM64">
+            <set name="OUT_ARCH" value="LinuxArm64" />
+        </section>
+        <section if="HXCPP_ARM7">
+            <set name="OUT_ARCH" value="LinuxArm7" />
+        </section>
+    </section>
+
+    <section if="mac">
+        <set name="OUT_ARCH" value="Mac64" />
+        <section if="HXCPP_ARM64">
+            <set name="OUT_ARCH" value="MacArm64" />
+        </section>
+    </section>
+
+    <section if="iphoneos">
+        <set name="OUT_ARCH" value="iPhoneArm64" />
+    </section>
+
+    <section if="iphonesim">
+        <set name="OUT_ARCH" value="iPhoneSim64" />
+    </section>
+
+    <section if="android">
+        <set name="OUT_ARCH" value="AndroidArm7" />
+        <section if="HXCPP_ARM64">
+            <set name="OUT_ARCH" value="AndroidArm64" />
+        </section>
+        <section if="HXCPP_X86">
+            <set name="OUT_ARCH" value="AndroidX86" />
+        </section>
+        <section if="HXCPP_M64">
+            <set name="OUT_ARCH" value="AndroidX64" />
+        </section>
+    </section>
+
+    <section if="windows">
+        <target id="default" tool="linker" toolid="dll" output="libhl">
+            <ext value=".dll" />
+            <outdir name="libs/${OUT_ARCH}" />
+
+            <files id="hashlink_sources" />
+            <files id="pcre_sources" />
+
+            <lib name="ws2_32.lib" />
+            <lib name="winmm.lib" />
+            <lib name="user32.lib" />
+        </target>
+    </section>
+
+    <section unless="windows">
+        <target id="default" tool="linker" toolid="static_link" output="hl">
+            <ext value=".lib" />
+            <outdir name="libs/${OUT_ARCH}" />
+
+            <files id="hashlink_sources" />
+            <files id="pcre_sources" />
+        </target>
+    </section>
+</xml>

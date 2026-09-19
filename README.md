@@ -1,0 +1,398 @@
+# HL_COMPILE
+
+Compile **HashLink/C** (HLC) programs to a native executable — or to WebAssembly — straight from the Haxe
+compiler. Add one library to your `.hxml`, run `haxe`, get an executable.
+
+```hxml
+--library hl_compile
+--hl bin/main.c
+--main Main
+```
+
+```
+$ haxe build.hxml
+[hlcompiler] Target platform: Windows (64)
+[hlcompiler] Native libs (Windows64): static [glfw] dynamic [glad]
+...
+[hlcompiler] Build completed successfully.
+```
+
+`hl_compile` ships the HashLink runtime sources, builds them once for your platform, generates the build
+file for the C code Haxe emitted, invokes the platform C compiler through [hxcpp](https://github.com/HaxeFoundation/hxcpp)
+and links your native libraries (`.hdll` or static libraries). No CMake, no Visual Studio solution, no
+Makefile to maintain.
+
+## Table of contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation and first build](#installation-and-first-build)
+- [Quick start](#quick-start)
+- [Output layout](#output-layout)
+- [Configuration (defines)](#configuration-defines)
+- [Platforms and architectures](#platforms-and-architectures)
+- [Native libraries (hdlls)](#native-libraries-hdlls)
+- [WebAssembly / Emscripten](#webassembly--emscripten)
+- [How it works (backend)](#how-it-works-backend)
+- [The one-runtime rule](#the-one-runtime-rule)
+- [Writing native libraries for hl_compile](#writing-native-libraries-for-hl_compile)
+- [Troubleshooting](#troubleshooting)
+- [Limitations](#limitations)
+- [Repository layout](#repository-layout)
+- [License](#license)
+
+## Features
+
+- **One-step HLC build.** A Haxe macro (`hlcompiler.HlCompiler.init()`, registered automatically by
+  `extraParams.hxml`) runs after Haxe generates the C code and builds the executable.
+- **Self-contained.** The HashLink runtime sources (and PCRE2) are bundled; nothing to download or install
+  besides a C toolchain and hxcpp.
+- **Runtime built on demand and cached.** The first build compiles the runtime for your target into
+  `libs/<Os><Arch>/`; later builds reuse it.
+- **Windows, Linux and WebAssembly** as primary targets, with macOS, ARM, iOS and Android code paths
+  (see [Platforms](#platforms-and-architectures) for their status).
+- **Native libraries, both flavours.** Dynamic `.hdll` files loaded at runtime, and static libraries linked
+  into the executable, side by side. If the same library exists in both, the static one wins.
+- **Automatic Windows plumbing.** Import libraries for every `.hdll` are generated from its export table,
+  hdlls are delay-loaded, the runtime DLL is copied next to the executable.
+- **Guards against a classic HashLink crash.** It refuses to link a `.hdll` that carries its own copy of the
+  runtime (see [the one-runtime rule](#the-one-runtime-rule)).
+- **Architecture selection** (`x64`, `x86`, `arm64`, `arm7`) and **executable naming** through plain
+  `-D` defines.
+
+## Requirements
+
+| | |
+|---|---|
+| Haxe | 4.3 or newer |
+| hxcpp | `haxelib install hxcpp` (used to drive the C toolchain) |
+| **Windows** | Visual Studio (2019 or newer recommended) or *Build Tools* with the **"Desktop development with C++"** workload (component `Microsoft.VisualStudio.Component.VC.Tools.x86.x64`). It is located through `vswhere`; `dumpbin.exe` and `lib.exe` from that toolchain are used to generate import libraries. |
+| **Linux** | `gcc` or `clang` with C11 support, plus the development packages your native libraries need (for GLFW: `libx11-dev`, `libgl1-mesa-dev`, ...). `nm` (binutils) is optional and enables an extra check. |
+| **macOS** | Xcode command line tools. |
+| **WebAssembly** | An activated [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html) (`emcc` reachable from the shell that runs `haxe`). |
+
+## Installation and first build
+
+```
+haxelib install hl_compile
+```
+
+The first time you build for a given platform, `hl_compile` compiles the HashLink runtime and stores it in
+the library folder:
+
+```
+<haxelib>/hl_compile/1,0,0/libs/<Os><Arch>/
+```
+
+Consequences worth knowing:
+
+- The first build takes noticeably longer than the following ones.
+- **The haxelib directory must be writable** for the user running `haxe`. If you use a system-wide haxelib
+  repository owned by root, create a personal one (`haxelib newrepo`) or use `haxelib dev`.
+- To force a rebuild of the runtime (for example after updating the library), delete the corresponding
+  `libs/<Os><Arch>/` folder.
+
+## Quick start
+
+`build.hxml`:
+
+```hxml
+--library hl_compile
+--hl bin/main.c
+--main Main
+```
+
+`Main.hx`:
+
+```haxe
+class Main {
+	static function main() {
+		Sys.println("Hello from HashLink/C");
+	}
+}
+```
+
+```
+haxe build.hxml
+./bin/build/Linux64/output          # Windows: bin\build\Windows64\output.exe
+```
+
+The `--hl` output **must end in `.c`**: that is what makes Haxe emit HashLink/C. `hl_compile` uses the
+directory of that file as its working directory.
+
+## Output layout
+
+```
+bin/
+├─ main.c                    HLC output generated by Haxe (plus hl/, _std/, haxe/, hlc.json, ...)
+├─ Build-Windows64.xml       hxcpp build file generated by hl_compile (one per target)
+└─ build/
+   └─ Windows64/
+      ├─ output.exe          your program            (WebAssembly: output.js + output.wasm)
+      ├─ libhl.dll           runtime, Windows only
+      └─ glfw.hdll ...       dynamic hdlls (and any .dll/.so/.dylib next to them)
+```
+
+- `bin/obj/` is temporary and is wiped on every build; the executable is rebuilt from scratch each time.
+- Everything the program needs at runtime is inside `build/<Os><Arch>/`; that folder is what you ship.
+- Static libraries are linked into the executable and are **not** copied.
+
+## Configuration (defines)
+
+All options are ordinary Haxe defines (`-D name` or `-D name=value`).
+
+| Define | Effect |
+|---|---|
+| `hl_exe_name=<name>` | Name of the executable (default `output`). |
+| `hl_compile_x64` / `hl_compile_x86` / `hl_compile_arm64` / `hl_compile_arm7` | Target architecture. Only one may be set. Default is 64-bit x86. `hl_compile_arm` is an alias of `hl_compile_arm64`. |
+| `hl_force_windows` / `hl_force_linux` / `hl_force_mac` / `hl_force_ios` / `hl_force_android` | Override the detected host OS (advanced; you need a matching toolchain). |
+| `hl_force_webassembly` | Build for WebAssembly. Also triggered by `hl_force_emscripten`, `emscripten`, `webassembly` and `wasm`. |
+| `hl_allow_embedded_runtime` | Skip the check that rejects `.hdll` files containing their own HashLink runtime. Use only if you know exactly why. |
+
+## Platforms and architectures
+
+The target folder name is `<Os><Arch>`, where `Arch` is `64`, `32`, `Arm64` or `Arm7` (WebAssembly has none).
+It is used for `libs/`, for `hdlls/` and for the output directory.
+
+| Target | Folder | Status |
+|---|---|---|
+| Windows x64 | `Windows64` | Supported |
+| Linux x64 | `Linux64` | Supported |
+| WebAssembly (Emscripten) | `WebAssembly` | Experimental, tested without native libraries |
+| macOS x64 / arm64 | `Mac64` / `MacArm64` | Experimental, not tested |
+| Linux arm64 / arm7 / x86 | `LinuxArm64` / `LinuxArm7` / `Linux32` | Experimental, not tested |
+| Windows x86 | `Windows32` | Experimental / Not tested |
+| iOS, Android | `iPhone…`, `Android…` | Experimental, selected with `hl_force_*`, not tested |
+
+*Experimental* means the code path exists but has not been validated end to end.
+
+## Native libraries (hdlls)
+
+Native libraries live next to your project, split by *how* they are linked:
+
+```
+hdlls/
+├─ static/
+│  └─ Windows64/    glfw_static.lib  glfw_static.deps      linked INTO the executable
+└─ dynamic/
+   └─ Windows64/    glad.hdll                              loaded at runtime
+```
+
+(`Windows64` is the target folder; use `Linux64`, `WebAssembly`, ... for the other targets.)
+
+Rules:
+
+1. **Both folders are linked.** A project can mix static and dynamic libraries.
+2. **Static wins.** Libraries are matched by *id*. If the same id exists in both folders, only the static
+   one is linked; the dynamic one is ignored and **not copied** to the build folder. A notice is printed.
+3. **Ids.** The id is the file name without extension, with a `_static` suffix removed, and (on non-Windows)
+   a leading `lib` removed. `glfw.hdll`, `glfw_static.lib`, `libglfw.a` and `glfw.a` are all the id `glfw`.
+   Two static files that resolve to the same id are an error.
+4. **Static file extension:** `.lib` on Windows, `.a` everywhere else. Dynamic libraries are `.hdll`.
+5. **`.deps` files.** A static library does not remember what it needs from the system. Put a
+   `<same name>.deps` file next to it: one linker argument per line, `#` starts a comment.
+
+   ```
+   # glfw_static.deps (Linux)
+   -lGL
+   -lX11
+   -lpthread
+   -ldl
+   -lm
+   ```
+
+   Arguments the executable already links are not repeated. On Windows they are `.lib` names, on macOS
+   `-framework X` lines are supported, and on WebAssembly any Emscripten link flag can be listed.
+6. **Dynamic libraries on Windows** are delay-loaded, and an import library (`<name>.lib` + `<name>.def`)
+   is generated next to each `.hdll` from its export table. Delete them to regenerate.
+7. **Old layout.** If neither `hdlls/static` nor `hdlls/dynamic` exists but `hdlls/<Os><Arch>/` does, its
+   contents are treated as dynamic and a notice asks you to move them.
+
+The companion libraries `hl_glfw` and `hl_glad` produce both flavours:
+
+```
+haxelib run hl_glfw                  # glfw.hdll                       -> hdlls/dynamic/<Os><Arch>/
+haxelib run hl_glfw --static-hdll    # glfw_static.lib|.a + .deps      -> hdlls/static/<Os><Arch>/
+```
+
+## WebAssembly / Emscripten
+
+### Enabling it
+
+```hxml
+--library hl_compile
+-D hl_force_webassembly
+--hl bin/main.c
+--main Main
+```
+
+`emcc` must be available (run your emsdk environment script first, e.g. `source emsdk_env.sh`).
+The target folder is `WebAssembly`, and the result is:
+
+```
+bin/build/WebAssembly/output.js
+bin/build/WebAssembly/output.wasm     (written by emcc next to the .js)
+```
+
+### What changes compared to a desktop build
+
+| | Desktop | WebAssembly |
+|---|---|---|
+| Toolchain | MSVC / gcc / clang | `emcc` through hxcpp's emscripten toolchain |
+| Runtime | `libhl.dll` (Windows) or static `hl.lib` | static `libs/WebAssembly/hl.a` (`libhl.a` is also accepted) |
+| Extra compile flags | — | `-DHL_WEBASM -D_GNU_SOURCE` |
+| Link flags | — | `-O3 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1` |
+| Native libraries | `.hdll` and/or static | **static only** |
+
+If the runtime archive is missing, it is built automatically the first time (`BuildHashlink.xml` is invoked
+with `-Demscripten`), exactly as on desktop.
+
+### Native libraries
+
+A WebAssembly module cannot load `.hdll` files. Build your natives as static libraries and put them in
+`hdlls/static/WebAssembly/` (`*.a`, plus `*.deps`). Any `.hdll` found in `hdlls/dynamic/WebAssembly/` is
+ignored, with a notice.
+
+Use the `.deps` file to pass Emscripten settings and libraries to the link step, one per line:
+
+```
+# glfw_static.deps (WebAssembly)
+-sUSE_GLFW=3
+```
+
+Because it is a plain forward to the linker, the same mechanism is how you enable settings such as
+`-sASYNCIFY` if your program needs them.
+
+### Running
+
+- Console programs: `node bin/build/WebAssembly/output.js`
+- Browser: serve the folder over HTTP (a `file://` page cannot fetch the `.wasm`), and load `output.js` from
+  an HTML page. Programs that draw need a `<canvas>` element handed to the module as `Module.canvas`.
+
+### Keep in mind
+
+- The browser is single-threaded and event-driven. A Haxe `while (running) { ... }` main loop blocks the tab
+  unless the program yields to the browser (Emscripten's main-loop API, or `-sASYNCIFY`). No such flag is
+  added for you.
+- `-pthread` is not enabled, so programs that spawn HashLink threads will not work.
+- OpenGL is WebGL 2 (a GLES 3.0 subset): desktop-GL loaders and `#version 330 core` shaders need adapting
+  (`#version 300 es`).
+- Emscripten provides its own GLFW implementation (`-sUSE_GLFW=3`), so the desktop GLFW sources are not
+  compiled for this target; parts of the API may be missing.
+
+## How it works (backend)
+
+```
+Haxe ──► HashLink/C generator ──► main.c + hl/ _std/ ...        (Haxe compiler)
+              │
+              ▼   onAfterGenerate  (hlcompiler.HlCompiler)
+   ┌──────────────────────────────────────────────────────────┐
+   │ 1. detect target (OS / arch / WebAssembly)               │
+   │ 2. runtime missing? build it: BuildHashlink.xml ──► hxcpp │──► libs/<Os><Arch>/
+   │ 3. resolve hdlls/static + hdlls/dynamic                  │
+   │ 4. generate Build-<Os><Arch>.xml                         │
+   │ 5. hxcpp compiles + links ──► MSVC | gcc/clang | emcc    │──► bin/build/<Os><Arch>/
+   │ 6. copy runtime DLL and dynamic hdlls next to the exe    │
+   └──────────────────────────────────────────────────────────┘
+```
+
+Details:
+
+- **Entry point.** `extraParams.hxml` adds `--macro hlcompiler.HlCompiler.init()` whenever the library is
+  used. `init()` detects the target and registers the build step to run when Haxe finishes generating.
+- **Compilation unit.** HLC emits a unity `main.c` that `#include`s every generated file and `hlc_main.c`
+  (the program entry point). `hl_compile` compiles the top-level `.c` files of the output directory with the
+  HashLink headers on the include path (`-std=c11` outside Windows).
+- **Runtime build.** `BuildHashlink.xml` is an hxcpp build file that compiles the HashLink runtime
+  (`gc.c`, the standard library) and PCRE2 from the bundled sources: as a **DLL on Windows**, as a **static
+  archive** everywhere else.
+- **Build file generation.** For every build a fresh hxcpp XML (`Build-<Os><Arch>.xml`) is written next to
+  the generated C code and handed to `haxelib run hxcpp`, with the right `-D` flags for the OS and
+  architecture. hxcpp selects and drives the platform compiler.
+- **Linking (per platform).**
+  - *Windows:* `libhl.lib` (import library of `libhl.dll`, generated from the DLL's export table), one import
+    library per dynamic hdll with `/DELAYLOAD`, static libraries as-is, plus `winmm`, `user32`, `gdi32`,
+    `shell32`, `opengl32`.
+  - *Linux / macOS:* the whole runtime archive is linked and **exported** from the executable
+    (`-rdynamic` / `-export_dynamic`), static libraries follow it and precede the system libraries they
+    depend on, dynamic hdlls are linked with `-rpath '$ORIGIN'` so they are found next to the executable.
+  - *WebAssembly:* static libraries, then the runtime archive, through `emcc`.
+- **Logging.** Every message is prefixed with `[hlcompiler]`. Failures print `[hlcompiler] Error: ...` and
+  stop the Haxe build with exit code 1.
+
+## The one-runtime rule
+
+A HashLink process must contain **exactly one** copy of the runtime: one garbage collector, one `hl_setup`,
+one set of type tables. If a native library carries its own statically-linked copy, then the moment it calls
+back into Haxe (`hl_dyn_call`, `hl_add_root`, ...) it runs against a runtime that was never initialised, and
+the program crashes — typically only on Windows and macOS, where a library's symbols do not get interposed
+by the executable's, and often *only* when a callback fires, because plain natives never touch the runtime.
+
+`hl_compile` therefore uses this model:
+
+| Platform | Where the single runtime lives | How natives reach it |
+|---|---|---|
+| Windows | `libhl.dll` | executable and every hdll import `libhl.lib`; static natives link against it |
+| Linux / macOS | inside the executable (exported) | hdlls leave `hl_*` undefined and resolve them against the executable |
+| WebAssembly | inside the module | everything is one module |
+
+At link time `hl_compile` rejects any `.hdll` that exports runtime symbols (`hl_global_init`, `hl_setup`,
+`hl_dyn_call`) with a message explaining how to rebuild it. Use `-D hl_allow_embedded_runtime` to bypass the check.
+
+## Writing native libraries for hl_compile
+
+For your own natives to work with every mode above:
+
+1. **Do not link the HashLink runtime into your library.** On Windows import `libhl.lib`; on Linux/macOS
+   leave the symbols undefined (macOS: `-Wl,-undefined,dynamic_lookup`).
+2. **Compile against the same `hl.h`** as the bundled runtime (`hashlink/src`).
+3. **Offer a static build.** When building statically, do not emit the `hlp_*` lookup tables (they only
+   exist for the JIT VM and collide when two static libraries define the same name). `hl_glfw` and `hl_glad`
+   do this with a `STATIC_HDLL` define.
+4. **Ship a `.deps` file** with every static library, listing the system libraries it needs.
+5. **Never let a Haxe exception unwind through foreign frames.** When a native calls a Haxe callback from
+   inside another library (window procedures, event loops...), use `hl_dyn_call_safe` and report the
+   exception instead of propagating it.
+
+## Troubleshooting
+
+| Message / symptom | Cause and fix |
+|---|---|
+| `No output detected. Did you compile with -hl <file>?` | The `--hl` argument is missing. It must be `--hl something.c`. |
+| `No .c files found in <dir>` | The `--hl` output does not end in `.c`, so Haxe did not generate HashLink/C. |
+| `vswhere.exe not found` / `could not find a Visual Studio installation` | Install Visual Studio or Build Tools with the *Desktop development with C++* workload. |
+| `<x>.hdll contains its own copy of the HashLink runtime` | The hdll was built with the runtime linked in. Rebuild it with a current `hl_glfw` / `hl_glad`, or your own library following [the rules](#writing-native-libraries-for-hl_compile). |
+| Program starts, then crashes when a callback fires (window resize, key press...) | Two runtimes in the process. Check with `dumpbin /dependents` (Windows) that the executable and every hdll import `libhl.dll`, and that no hdll exports `hl_*`. |
+| `libhl.dll` not found when launching the program (Windows) | Run the executable from `build/<Os><Arch>/`, where `hl_compile` copies it; ship the DLL with your program. |
+| Error creating files under the haxelib folder | The runtime is built into the library directory, which must be writable (see [Installation](#installation-and-first-build)). |
+| Undefined references to `-lm`, `-lGL`, ... on Linux | A static library is missing its `.deps` file, or the file lacks that entry. |
+| `hxcpp exited with code N` | The C compiler failed. The lines above the message are hxcpp's and the compiler's own output. |
+| Old objects seem to be used after switching hdll mode | Delete `bin/obj`, or rebuild the hdll with the library's own tool, which resets its objects when the mode changes. |
+
+## Limitations
+
+- HashLink/C only (`--hl file.c`). The JIT/bytecode target does not need this library.
+- The executable is rebuilt from scratch on every run; there is no incremental C build.
+- Cross compilation depends on the toolchain you provide; `hl_force_*` only selects the target, it does not
+  install one.
+- Extra compiler/linker flags cannot be passed through a define. The `.deps` mechanism covers link-time
+  needs of native libraries.
+- WebAssembly has the constraints listed [above](#keep-in-mind).
+
+## Repository layout
+
+```
+hl_compile/
+├─ haxelib.json
+├─ extraParams.hxml          registers the macro (--macro hlcompiler.HlCompiler.init())
+├─ hlcompiler/
+│  └─ HlCompiler.hx          the whole build pipeline
+├─ BuildHashlink.xml         builds the HashLink runtime (DLL on Windows, static elsewhere)
+├─ hashlink/                 HashLink sources (git submodule)
+└─ libs/<Os><Arch>/          runtime built on first use (generated, not versioned)
+```
+
+## License
+
+`hl_compile` is released under the MIT license. It bundles [HashLink](https://github.com/HaxeFoundation/hashlink)
+(MIT) and, through it, PCRE2 (BSD); their licenses are included with their sources under `hashlink/`.
