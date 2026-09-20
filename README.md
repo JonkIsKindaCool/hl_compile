@@ -1,4 +1,4 @@
-# HL_COMPILE
+# hl_compile
 
 Compile **HashLink/C** (HLC) programs to a native executable — or to WebAssembly — straight from the Haxe
 compiler. Add one library to your `.hxml`, run `haxe`, get an executable.
@@ -158,11 +158,11 @@ It is used for `libs/`, for `hdlls/` and for the output directory.
 |---|---|---|
 | Windows x64 | `Windows64` | Supported |
 | Linux x64 | `Linux64` | Supported |
-| WebAssembly (Emscripten) | `WebAssembly` | Experimental, tested without native libraries |
-| macOS x64 / arm64 | `Mac64` / `MacArm64` | Experimental, not tested |
-| Linux arm64 / arm7 / x86 | `LinuxArm64` / `LinuxArm7` / `Linux32` | Experimental, not tested |
-| Windows x86 | `Windows32` | Experimental / Not tested |
-| iOS, Android | `iPhone…`, `Android…` | Experimental, selected with `hl_force_*`, not tested |
+| WebAssembly (Emscripten) | `WebAssembly` | Supported |
+| macOS x64 / arm64 | `Mac64` / `MacArm64` | Experimental |
+| Linux arm64 / arm7 / x86 | `LinuxArm64` / `LinuxArm7` / `Linux32` | Experimental |
+| Windows x86 | `Windows32` | Experimental |
+| iOS, Android | `iPhone…`, `Android…` | Experimental, selected with `hl_force_*` |
 
 *Experimental* means the code path exists but has not been validated end to end.
 
@@ -241,7 +241,7 @@ bin/build/WebAssembly/output.wasm     (written by emcc next to the .js)
 | Toolchain | MSVC / gcc / clang | `emcc` through hxcpp's emscripten toolchain |
 | Runtime | `libhl.dll` (Windows) or static `hl.lib` | static `libs/WebAssembly/hl.a` (`libhl.a` is also accepted) |
 | Extra compile flags | — | `-DHL_WEBASM -D_GNU_SOURCE` |
-| Link flags | — | `-O3 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1` |
+| Link flags | — | `-O3 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 -s DEFAULT_TO_CXX=1` |
 | Native libraries | `.hdll` and/or static | **static only** |
 
 If the runtime archive is missing, it is built automatically the first time (`BuildHashlink.xml` is invoked
@@ -275,6 +275,10 @@ Because it is a plain forward to the linker, the same mechanism is how you enabl
   unless the program yields to the browser (Emscripten's main-loop API, or `-sASYNCIFY`). No such flag is
   added for you.
 - `-pthread` is not enabled, so programs that spawn HashLink threads will not work.
+- OpenGL is WebGL 2 (a GLES 3.0 subset): desktop-GL loaders and `#version 330 core` shaders need adapting
+  (`#version 300 es`).
+- Emscripten provides its own GLFW implementation (`-sUSE_GLFW=3`), so the desktop GLFW sources are not
+  compiled for this target; parts of the API may be missing.
 
 ## How it works (backend)
 

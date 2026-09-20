@@ -142,6 +142,12 @@
                 <compilerflag value="-DHL_64" />
             </section>
         </section>
+
+        <!-- WebAssembly / Emscripten -->
+        <section if="emscripten">
+            <compilerflag value="-DHL_WEBASM" />
+            <compilerflag value="-D_GNU_SOURCE" />
+        </section>
     </files>
 
     <set name="OUT_ARCH" value="unknown" />
@@ -191,6 +197,10 @@
         </section>
     </section>
 
+    <section if="emscripten">
+        <set name="OUT_ARCH" value="WebAssembly" />
+    </section>
+
     <section if="windows">
         <target id="default" tool="linker" toolid="dll" output="libhl">
             <ext value=".dll" />
@@ -205,7 +215,17 @@
         </target>
     </section>
 
-    <section unless="windows">
+    <section if="emscripten">
+        <target id="default" tool="linker" toolid="static_link" output="hl">
+            <ext value=".a" />
+            <outdir name="libs/${OUT_ARCH}" />
+
+            <files id="hashlink_sources" />
+            <files id="pcre_sources" />
+        </target>
+    </section>
+
+    <section unless="windows || emscripten">
         <target id="default" tool="linker" toolid="static_link" output="hl">
             <ext value=".lib" />
             <outdir name="libs/${OUT_ARCH}" />
