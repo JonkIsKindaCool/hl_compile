@@ -11,8 +11,8 @@
         "cross"
     ],
     "description": "Builds HashLink/C programs into native executables or WebAssembly straight from the Haxe compiler.",
-    "version": "1.0.0",
-    "releasenote": "Initial release: HashLink/C build pipeline for Windows, Linux and WebAssembly, with static and dynamic native libraries.",
+    "version": "1.1.0",
+    "releasenote": "Added split compilation, c files are being cached.",
     "contributors": [
         "JonkIsKindaCool"
     ],
