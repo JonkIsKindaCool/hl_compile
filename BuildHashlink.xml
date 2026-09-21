@@ -143,7 +143,6 @@
             </section>
         </section>
 
-        <!-- WebAssembly / Emscripten -->
         <section if="emscripten">
             <compilerflag value="-DHL_WEBASM" />
             <compilerflag value="-D_GNU_SOURCE" />
