@@ -11,8 +11,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: Linux,        os: ubuntu-latest,    experimental: false }
-          - { name: Windows,      os: windows-latest,   experimental: false }
+          - { name: Linux,         os: ubuntu-latest,     experimental: false }
+          - { name: Windows,       os: windows-latest,    experimental: false }
           - { name: macOS (Intel), os: macos-15-intel,    experimental: true  }
 
     steps:
@@ -31,12 +31,23 @@ jobs:
       - name: Register hl_compile
         run: haxelib dev hl_compile .
 
+      - name: Update hashlink submodule to latest
+        shell: bash
+        run: |
+          # Force the hashlink submodule to point at the latest revision
+          # (it contains the include/mdbg folder needed on Intel macOS).
+          git submodule update --remote hashlink
+          # Make sure hashlink's own submodules are updated too
+          if [ -d hashlink ]; then
+            pushd hashlink
+            git submodule update --init --recursive
+            popd
+          fi
+
       - name: Init nested submodules (mdbg, etc.)
         shell: bash
         run: |
-          # First-level submodules (includes hashlink)
           git submodule update --init --recursive
-          # Submodules inside hashlink (mdbg lives here)
           if [ -d hashlink ]; then
             pushd hashlink
             git submodule update --init --recursive

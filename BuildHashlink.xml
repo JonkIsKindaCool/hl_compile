@@ -98,18 +98,12 @@
             </section>
         </section>
 
-        <section if="mac">
-            <compilerflag value="-DHL_MAC" />
-        </section>
-
         <section if="iphoneos">
             <compilerflag value="-DHL_IOS" />
-            <compilerflag value="-DHL_MAC" />
         </section>
 
         <section if="iphonesim">
             <compilerflag value="-DHL_IOS" />
-            <compilerflag value="-DHL_MAC" />
         </section>
 
         <section if="android">
