@@ -183,7 +183,6 @@
         </section>
     </files>
 
-    <!-- The unmodified HashLink main, renamed so vm/launcher.c can be the real entry point. -->
     <files id="vm_main">
         <depend name="${HL_INCLUDE}/hl.h" />
         <file name="${HL_SRC}/main.c" />
@@ -284,7 +283,6 @@
         </target>
     </section>
 
-    <!-- The precompiled VM used by the bytecode mode: haxelib run hxcpp BuildHashlink.xml vm -->
     <section if="windows">
         <target id="vm" tool="linker" toolid="exe" output="hl">
             <ext value=".exe" />

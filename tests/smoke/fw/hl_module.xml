@@ -1,5 +1,5 @@
 <hlmodule name="hlfw">
-  <requires hl_compile="1.4.0" />
+  <requires hl_compile="1.2.0" />
   <files>
     <compilerflag value="-I${HLMODULE_DIR}/native" />
     <file name="native/fw.c" />
