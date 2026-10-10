@@ -11,14 +11,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: Linux, os: ubuntu-latest, experimental: false }
-          - { name: Windows, os: windows-latest, experimental: false }
-          - { name: macOS (Intel), os: macos-15-intel, experimental: true }
+          - { name: Linux,        os: ubuntu-latest,    experimental: false }
+          - { name: Windows,      os: windows-latest,   experimental: false }
+          - { name: macOS (Intel), os: macos-15-intel,    experimental: true  }
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - uses: krdlab/setup-haxe@v2
         with:
@@ -29,6 +30,18 @@ jobs:
 
       - name: Register hl_compile
         run: haxelib dev hl_compile .
+
+      - name: Init nested submodules (mdbg, etc.)
+        shell: bash
+        run: |
+          # First-level submodules (includes hashlink)
+          git submodule update --init --recursive
+          # Submodules inside hashlink (mdbg lives here)
+          if [ -d hashlink ]; then
+            pushd hashlink
+            git submodule update --init --recursive
+            popd
+          fi
 
       - name: Check the toolchain
         run: haxelib run hl_compile doctor
