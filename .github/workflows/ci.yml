@@ -13,8 +13,7 @@ jobs:
         include:
           - { name: Linux, os: ubuntu-latest, experimental: false }
           - { name: Windows, os: windows-latest, experimental: false }
-          # The macOS runners are mostly Apple Silicon, where only HashLink/C mode applies.
-          - { name: macOS, os: macos-latest, experimental: true }
+          - { name: macOS (Intel), os: macos-15-intel, experimental: true }
 
     steps:
       - uses: actions/checkout@v4
