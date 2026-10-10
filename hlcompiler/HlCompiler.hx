@@ -683,9 +683,7 @@ class HlCompiler {
 		buf.add('    <target id="default" tool="linker" toolid="exe" output="$exeName" rebuild="true">\n');
 		if (os == "Windows") {
 			buf.add('        <flag value="/NOIMPLIB" />\n');
-			if (nativeLibs.statics.length > 0) {
-				buf.add('        <flag value="/IGNORE:4217,4286" />\n');
-			}
+			buf.add('        <flag value="/IGNORE:4217,4286" />\n');
 			buf.add('        <ext value=".exe" />\n');
 		} else if (os == "WebAssembly") {
 			buf.add('        <ext value=".html" />\n');
@@ -1957,9 +1955,17 @@ class HlCompiler {
 			while (wave.length < limit && next < dirs.length) {
 				var i:Int = next++;
 				var log:String = Path.join([dirs[i], "build.log"]);
-				var cmd:String = windows ? 'cd /d "${dirs[i]}" && $hx > "$log" 2>&1' : 'cd "${dirs[i]}" && $hx > "$log" 2>&1';
 				try {
-					wave.push({index: i, proc: windows ? new Process("cmd", ["/c", cmd]) : new Process("sh", ["-c", cmd]), log: log});
+					var proc:Process;
+					if (windows) {
+						var bat:String = Path.join([dirs[i], "build.bat"]);
+						File.saveContent(bat, '@echo off\r\n' + 'cd /d "%~dp0"\r\n' + hx + ' > "build.log" 2>&1\r\n' + 'exit /b %ERRORLEVEL%\r\n');
+						proc = new Process("cmd", ["/c", bat]);
+					} else {
+						var cmd:String = 'cd "${dirs[i]}" && $hx > "$log" 2>&1';
+						proc = new Process("sh", ["-c", cmd]);
+					}
+					wave.push({index: i, proc: proc, log: log});
 				} catch (e:Dynamic) {
 					results[i] = {code: -1, output: 'Could not start hxcpp: $e'};
 				}
@@ -1967,7 +1973,10 @@ class HlCompiler {
 			for (w in wave) {
 				var code:Int = w.proc.exitCode();
 				w.proc.close();
-				results[w.index] = {code: code, output: FileSystem.exists(w.log) ? File.getContent(w.log) : ""};
+				results[w.index] = {
+					code: code,
+					output: FileSystem.exists(w.log) ? File.getContent(w.log) : ""
+				};
 			}
 		}
 		return results;

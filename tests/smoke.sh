@@ -2,6 +2,17 @@
 # Builds tests/smoke in HashLink/C mode and (on x86-64) in bytecode/VM mode, and checks what each one prints.
 # Needs: haxe, hxcpp, and hl_compile registered with `haxelib dev hl_compile <this repository>`.
 set -euo pipefail
+
+# Pause when the script ends, whatever the exit code is (success or failure),
+# so the window does not close before the result can be read.
+pause() {
+	local code=$?
+	echo
+	read -r -p "Press Enter to close..." _ || true
+	exit "$code"
+}
+trap pause EXIT
+
 cd "$(dirname "$0")/smoke/app"
 
 exe() {
