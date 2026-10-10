@@ -28,10 +28,14 @@ Makefile to maintain.
 - [Requirements](#requirements)
 - [Installation and first build](#installation-and-first-build)
 - [Quick start](#quick-start)
+- [Command line tools](#command-line-tools)
 - [Output layout](#output-layout)
 - [Configuration (defines)](#configuration-defines)
 - [Platforms and architectures](#platforms-and-architectures)
 - [Native libraries (hdlls)](#native-libraries-hdlls)
+- [Modules (frameworks)](#modules-frameworks)
+- [Bytecode (VM) mode](#bytecode-vm-mode)
+- [Injecting native code from Haxe](#injecting-native-code-from-haxe)
 - [WebAssembly / Emscripten](#webassembly--emscripten)
 - [How it works (backend)](#how-it-works-backend)
 - [The one-runtime rule](#the-one-runtime-rule)
@@ -117,8 +121,33 @@ haxe build.hxml
 ./bin/build/Linux64/output          # Windows: bin\build\Windows64\output.exe
 ```
 
-The `--hl` output **must end in `.c`**: that is what makes Haxe emit HashLink/C. `hl_compile` uses the
-directory of that file as its working directory.
+The extension of the `--hl` output selects the mode. `--hl bin/main.c` makes Haxe emit HashLink/C and
+`hl_compile` builds a native executable from it. `--hl bin/main.hl` makes Haxe emit bytecode and `hl_compile`
+runs it on a precompiled VM, see [Bytecode (VM) mode](#bytecode-vm-mode). `hl_compile` uses the directory of
+that file as its working directory.
+
+## Command line tools
+
+`haxelib run hl_compile <command>` wraps the common tasks. Everything also works by calling `haxe` yourself.
+
+| Command | What it does |
+|---|---|
+| `doctor [--wasm]` | Checks Haxe, hxcpp, the C compiler (gcc/clang or Visual Studio), `nm`, the HashLink sources and the cached runtime and VM, and says how to fix what is missing. Exits with 1 if something blocks building. |
+| `build <file.hxml> [--release]` | Development build: bytecode on the VM. With `--release`: HashLink/C into `<out>/release`, so both builds can live side by side. The `--hl` line of the `.hxml` only provides the location. Extra arguments go to `haxe`. |
+| `run <file.hxml> [--release] [--debug [port]] [-- args]` | Builds and runs. `--debug` starts the VM waiting for a debugger on the port (default 6112). |
+| `watch <file.hxml> [--run] [--hot]` | Rebuilds when a `.hx`, `.hxml`, C/C++ source or `hl_module.xml` changes. With `--run` the program is closed before each rebuild (its hdlls are loaded and cannot be overwritten) and started again after every successful build; if the build fails it stays stopped until one succeeds. A program that blocks for a long time, such as a window loop, does not hold up the watching. `--hot` (which implies `--run`) starts the VM with `--hot-reload` and keeps it running while only the bytecode changes; when native code changed and an hdll cannot be replaced, it closes the program and builds again. It is experimental: see below. |
+| `clean [dir] [--runtime] [--global]` | Removes the build files (`obj`, caches, `hdll`, `build`, ...) of `dir` (default `bin`) and `dir/release`. `--runtime` also removes the cached runtime and VM. `--global` removes the folder in `HL_COMPILE_CACHE`. |
+| `package [dir] [--name n] [--archive] [--app]` | Copies a build to `dist/<name>-<target>`, without build leftovers. `--archive` makes a `.tar.gz` (a `.zip` on Windows). `--app` creates a macOS `.app` bundle (`--id`, `--icon`). |
+| `vscode [file.hxml]` | Creates `.vscode/tasks.json` and `launch.json` to build, start the VM waiting for a debugger and attach with the HashLink Debugger extension. Build with `-debug` for line information. |
+| `new-module <name>` | Creates a framework skeleton: `haxelib.json`, `hl_module.xml`, a C file that works in both modes and its Haxe extern. |
+
+**Hot reload.** The VM's `--hot-reload` swaps changed functions in a running program, which has to call
+`hl.Api.checkReload()` regularly (Heaps does). In my tests (Haxe 4.3.6 and HashLink master) the VM crashed when it
+applied a change, with the VM built by hl_compile and also with the one built by HashLink's own Makefile, so
+`watch --run` restarts the program by default. Try `--hot` with a newer Haxe/HashLink.
+
+**Debugging.** `run --debug` and the generated VS Code files rely on the VM's own debugger server. The files were
+not tested against the HashLink Debugger extension.
 
 ## Output layout
 
@@ -147,6 +176,13 @@ All options are ordinary Haxe defines (`-D name` or `-D name=value`).
 | `hl_compile_x64` / `hl_compile_x86` / `hl_compile_arm64` / `hl_compile_arm7` | Target architecture. Only one may be set. Default is 64-bit x86. `hl_compile_arm` is an alias of `hl_compile_arm64`. |
 | `hl_force_windows` / `hl_force_linux` / `hl_force_mac` / `hl_force_ios` / `hl_force_android` | Override the detected host OS (advanced; you need a matching toolchain). |
 | `hl_force_webassembly` | Build for WebAssembly. Also triggered by `hl_force_emscripten`, `emscripten`, `webassembly` and `wasm`. |
+| `hl_cflags="..."` | Extra compiler flags for everything `hl_compile` compiles (generated C, `natives/`, modules, hdlls), separated by spaces. Cannot change the optimization level: hxcpp's toolchain fixes `-O2`. |
+| `hl_ldflags="..."` | Extra linker flags for the executable and the hdlls. |
+| `hl_lto` | Link-time optimization (`-flto`, or `/GL` + `/LTCG` with MSVC; the MSVC flags are untested). |
+| `hl_asan` | AddressSanitizer on Linux and macOS (HashLink/C mode; the VM and its hdlls would need it too). |
+| `hl_jobs=<n>` | VM mode: how many hdlls are built at the same time (default 4, `1` builds them one after another). |
+| `hl_strict_natives` | VM mode: turn the warnings about missing hdlls/functions into an error. |
+| `hl_natives_hdll=<name>` | VM mode only: name of the hdll built from the project's `natives/` folder (default `natives`). |
 | `hl_allow_embedded_runtime` | Skip the check that rejects `.hdll` files containing their own HashLink runtime. Use only if you know exactly why. |
 
 ## Platforms and architectures
@@ -214,6 +250,252 @@ The companion libraries `hl_glfw` and `hl_glad` produce both flavours:
 haxelib run hl_glfw                  # glfw.hdll                       -> hdlls/dynamic/<Os><Arch>/
 haxelib run hl_glfw --static-hdll    # glfw_static.lib|.a + .deps      -> hdlls/static/<Os><Arch>/
 ```
+
+## Modules (frameworks)
+
+A haxelib — or the project itself — can add native code to the final build by shipping an **`hl_module.xml`**.
+It plays the role `include.xml` plays for hxcpp, but it is read by `hl_compile` and merged into the build
+file it generates, so a framework can bring its own C/C++ sources, flags, libraries, hdlls and runtime files
+without the user touching the `.hxml`.
+
+```hxml
+--library my_framework      # nothing else: its hl_module.xml is picked up automatically
+--hl bin/main.c
+--main Main
+```
+
+### Discovery
+
+`hl_compile` looks for `hl_module.xml` in every Haxe class path, in the class path folder itself and in its
+two parents (so both `<lib>/` and `<lib>/src/` layouts work; `haxelib dev` and `-cp` work too), and in the
+project folder. Every module found is listed in the log: `[hlcompiler] Modules: my_framework, app`.
+
+### Format
+
+```xml
+<hlmodule name="my_framework">                 <!-- name is optional (defaults to the folder name) -->
+
+  <files>                                      <!-- compiled with your natives/ folder -->
+    <compilerflag value="-I${HLMODULE_DIR}/native" />
+    <file name="native/fw.c" />                <!-- relative to this file -->
+    <file name="native/fw_win.c" if="windows" />
+  </files>
+
+  <files group="hlc">                          <!-- flags for the code Haxe generated -->
+    <compilerflag value="-DMY_FRAMEWORK" />
+  </files>
+
+  <target>                                     <!-- libraries / linker flags of the executable -->
+    <lib name="-lz" if="linux" />
+    <lib name="native/${HL_FOLDER}/z.lib" if="windows" />
+  </target>
+
+  <hdlls dir="hdlls" />                        <!-- extra hdlls/ root (static/ and dynamic/) -->
+
+  <copy from="assets" to="assets" />           <!-- copied into build/<target>/assets -->
+  <copy from="bin/${HL_FOLDER}/extra.dll" optional="true" />
+
+  <set name="MY_FRAMEWORK" value="1" />        <!-- plain hxcpp elements: pasted as they are -->
+</hlmodule>
+```
+
+| Element | What it does |
+|---|---|
+| `<files>` | Its children (`<file>`, `<compilerflag>`, `<depend>`, ...) are added to the `natives` group. `group="hlc"` adds them to the group that compiles the Haxe-generated C instead. |
+| `<files id="x">` | A complete hxcpp file group with its own id, pasted at the top level of the build file. Reference it from `<target>` with `<files id="x" />`. |
+| `<target>` | Its children (`<lib>`, `<flag>`, `<section>`, ...) are added to the executable target. They are placed after the project's static libraries and before the system libraries. |
+| `<hdlls dir="...">` | Another root laid out like the project's `hdlls/` (`static/<target>`, `dynamic/<target>`). See below for conflicts. |
+| `<copy from="..." to="..." optional="true">` | Copies a file, or the contents of a folder, into `build/<target>/<to>` after the build. `to` is a folder. A missing source is an error unless `optional="true"`. |
+| `<requires module="x" />`, `<requires define="x" />`, `<requires hl_compile="1.4.0" />` | Stops the build with a clear message when another module is not present, a `-D` is missing, or hl_compile is older than the given version. |
+| `<pkgconfig name="sdl3" />` | Runs `pkg-config` and adds its compiler flags to the module's sources and its libraries to the link. Linux and macOS; on Windows describe the library with `<lib>` and an `if="windows"` condition. |
+| `<set>`, `<unset>`, `<section>`, `<error>`, `<echo>` | Pasted verbatim at the top level of the build file. Handy for guards such as `<error value="..." unless="HXCPP_M64" />`. |
+
+### Variables
+
+These are substituted in every attribute before the module is used:
+
+| Variable | Value |
+|---|---|
+| `${HLMODULE_DIR}` | Absolute folder of the `hl_module.xml`. |
+| `${HLMODULE_NAME}` | The module name. |
+| `${HL_FOLDER}` | Target folder (`Windows64`, `Linux64`, `WebAssembly`, ...). |
+| `${HL_INCLUDE}` | HashLink headers (`hl.h`). |
+
+The generated build file also defines `HL_FOLDER`, `HL_INCLUDE` and `HLMODULE_<NAME>_DIR` for every module as
+hxcpp variables, so one module can refer to another one's folder.
+
+### Paths and conditions
+
+- A relative `name` in `<file>`, `<depend>` or `<lib>`, and a relative `from`/`dir`, is resolved against the
+  folder of the `hl_module.xml`. (hxcpp would resolve it against the build directory.) Names that start with
+  `-` or `${` are left alone.
+- `if` / `unless` on the blocks `hl_compile` handles itself (`<files>`, `<target>`, `<hdlls>`, `<copy>`)
+  accept `windows`, `linux`, `mac`, `android`, `ios`, `wasm` (or `emscripten`), `x64`, `x86`, `arm64`, `arm7`
+  and any Haxe define, combined with `!`, `&&` and `||`. On the elements *inside* a block they are passed to
+  hxcpp, which evaluates them with its own rules.
+
+### Conflicts and rebuilds
+
+- **hdlls.** Roots are searched in order: the project's `hdlls/` first, then modules in class path order. If
+  the same library id appears twice, the first one wins and a notice is printed. A static library still wins
+  over a dynamic one with the same id, whichever root it comes from.
+- **Flags are shared.** All modules' `<files>` go into one `natives` group, so a `-I` or `-D` added by one
+  module applies to every native file.
+- **Rebuilds.** Changing a module's `hl_module.xml`, its `<file>` sources, its `<copy>` sources or any file in
+  its `-I` folders invalidates the "up to date" check. With the compile cache on, module and `natives/` sources are
+  cached per file too; when any header in those folders changes, the whole group is compiled again.
+- **Haxe side.** A module only adds native code; the Haxe externs live in the library's class path as usual
+  (`@:hlNative("my_framework", "fw_answer")` resolves to the C function `my_framework_fw_answer`).
+- **Both modes.** In [VM mode](#bytecode-vm-mode) every module that has `<files>` is built into its own
+  `<module name>.hdll`, so the module name must match the library name used in `@:hlNative`. Write the native
+  code the standard hdll way (below) and the same module works in both modes.
+
+### Example
+
+`my_framework/hl_module.xml`:
+
+```xml
+<hlmodule name="my_framework">
+  <files>
+    <compilerflag value="-I${HLMODULE_DIR}/native" />
+    <file name="native/fw.c" />
+  </files>
+  <copy from="assets" to="assets" />
+</hlmodule>
+```
+
+`my_framework/native/fw.c`:
+
+```c
+#include <hl.h>
+int my_framework_fw_answer(void) { return 42; }
+```
+
+`my_framework/src/Fw.hx`:
+
+```haxe
+class Fw {
+	@:hlNative("my_framework", "fw_answer")
+	public static function answer():Int { return 0; }
+}
+```
+
+Building a project that uses `--library my_framework` produces an executable where `Fw.answer()` returns 42
+and `build/<target>/assets/` contains the framework's assets.
+
+To make that module work in bytecode mode as well, write `fw.c` the way every HashLink library is written:
+`HL_NAME` gives the symbol its library prefix and `DEFINE_PRIM` registers it with its signature.
+
+```c
+#define HL_NAME(n) my_framework_##n
+#include <hl.h>
+
+HL_PRIM int HL_NAME(fw_answer)(void) { return 42; }
+DEFINE_PRIM(_I32, fw_answer, _NO_ARG)
+```
+
+In HashLink/C mode this is the function `my_framework_fw_answer` that the generated code calls. In VM mode
+`DEFINE_PRIM` exports it from the hdll. `hl_compile` passes `-DHL_COMPILE_HLC` or `-DHL_COMPILE_VM` while
+compiling module and `natives/` sources, in case a file needs to tell the modes apart.
+
+## Bytecode (VM) mode
+
+HashLink/C gives the best runtime performance, but every change means compiling the generated C again. For
+development it is faster to let Haxe emit bytecode and run it on a VM that is built only once. Selecting it
+takes one change in the `.hxml`:
+
+```hxml
+--library hl_compile
+--hl bin/main.hl        # .hl instead of .c
+--main Main
+```
+
+```
+haxe build.hxml
+./bin/build/Linux64/output          # Windows: bin\build\Windows64\output.exe
+```
+
+What `hl_compile` does in this mode:
+
+1. Builds the HashLink VM (`libs/<target>/hl[.exe]`) the first time, from the HashLink sources, and caches it
+   like the runtime. Delete the file to rebuild it.
+2. Copies the VM to `bin/build/<target>/<hl_exe_name>` and the bytecode next to it as `hlboot.dat`. The
+   executable looks for `hlboot.dat` in its own folder, so it can be started from any directory. Program
+   arguments are passed through.
+3. Builds the native code into hdlls, placed next to the executable. Each one is only rebuilt when its own
+   sources changed:
+
+   | hdll | Built from |
+   |---|---|
+   | `hashlinkinjections.hdll` | `@:injectHeaderCode` / `@:injectNativeFunction` ([below](#injecting-native-code-from-haxe)) |
+   | `<module name>.hdll` | the `<files>` of each [`hl_module.xml`](#modules-frameworks). Its `<target>` libraries and flags are used to link that hdll. |
+   | `natives.hdll` | the project's `natives/` folder (name set with `-D hl_natives_hdll=<name>`) |
+
+4. Copies prebuilt hdlls from `hdlls/dynamic/<target>` and from modules' `<hdlls>` roots, and the modules'
+   `<copy>` files, exactly as in HashLink/C mode.
+
+Build-time checks and speed:
+
+- The native table of the bytecode is read after every build. A library the program needs that was neither
+  built nor found (`fmt.hdll`, say), or a function an hdll does not export, is reported as a warning instead
+  of failing when the program starts. `-D hl_strict_natives` makes it an error.
+- hdlls that changed are built at the same time (`-D hl_jobs=<n>`), and the VM executable and `hlboot.dat` are
+  only rewritten when their content changed, so a build never touches a program that is running.
+- The launcher accepts the VM options `--debug <port>`, `--debug-wait`, `--debug-opt`, `--hot-reload`,
+  `--profile <n>` and `--dump` before the program's own arguments.
+
+The project's `natives/` folder also serves the other hdlls of the project, as it serves the executable in
+HashLink/C mode: its folder is added to the include path (`-I`) and its static libraries (`.lib`/`.a`) are linked,
+even when it has no `.c` file of its own. So injected code can `#include <SDL3/SDL.h>` from `natives/SDL3/` and
+call the library. If a library is an import library (`SDL3.lib` for `SDL3.dll`), put the `.dll` in
+`hdlls/dynamic/<target>` (or copy it with a module's `<copy>`) so it ends up next to the executable. When both
+`hashlinkinjections.hdll` and `natives.hdll` exist, each gets its own copy of the static libraries and their
+state, so keep the code that uses one library in a single place.
+
+A module without `<file>` entries (only `<compilerflag>`, `<target>` libraries, `<pkgconfig>`...) has no sources
+to build, so what it declares is applied to the hdlls built from the project's injections and `natives/`.
+
+Things that work differently from HashLink/C mode:
+
+- Static libraries (`hdlls/static`, `.a`/`.lib` in `natives/`) cannot be used by a VM: they are ignored, with a
+  notice. Link them into one of your own hdlls through a module's `<target>` instead.
+- The VM only includes the HashLink core. The standard hdlls of the HashLink repository (`fmt`, `ssl`, `sdl`,
+  `uv`, ...) are not built; put prebuilt ones in `hdlls/dynamic/<target>`.
+- Native code that calls into the runtime needs the VM to resolve those symbols when it loads the hdll. This is
+  handled by the link step; you only write ordinary hdll code with `HL_NAME` and `DEFINE_PRIM`.
+- Requires x86-64 (the HashLink JIT). WebAssembly, 32-bit and ARM targets must use `--hl <file>.c`.
+- The `hl_unity`, compile cache and `hl_exe_name` options of the C backend do not apply to the bytecode itself;
+  `hl_exe_name` still names the executable, and `hl_fast` / `hl_force` apply to the hdlls.
+
+## Injecting native code from Haxe
+
+Two metadata let you write C next to the Haxe code that uses it, with no separate file:
+
+```haxe
+@:injectHeaderCode("static int calls = 0;")          // placed after #include <hl.h>
+class Inj {
+	@:injectNativeFunction("calls++; return name->length * 2 + x + calls;")
+	public static function twice(name:String, x:Int):Int { return 0; }   // the Haxe body is not used
+}
+```
+
+The C code becomes the body of a function whose parameters carry the Haxe names. It is written to
+`<output dir>/injections/<Class>/<Class>.c` and compiled with the rest of the native code: into the executable in
+HashLink/C mode, into `hashlinkinjections.hdll` in VM mode. The same source works in both modes.
+
+| Haxe type | C type | hdll signature (VM mode) |
+|---|---|---|
+| `Int` / `Float` / `Single` / `Bool` / `Void` | `int` / `double` / `float` / `bool` / `void` | `_I32` / `_F64` / `_F32` / `_BOOL` / `_VOID` |
+| `String` | `vstring*` | `_STRING` |
+| `hl.Bytes` | `vbyte*` | `_BYTES` |
+| `Dynamic`, `Any` | `vdynamic*` | `_DYN` |
+| `Null<Int>`, `Null<Float>`, `Null<Single>`, `Null<Bool>` and optional arguments of those | `vdynamic*` | `_NULL(...)` |
+| function types | `vclosure*` | `_FUN(...)` |
+| `hl.NativeArray` | `varray*` | `_ARR` |
+
+In VM mode the VM compares the signature with the bytecode and refuses to start on a mismatch, so other types are
+rejected at compile time with an explanation. Use `Dynamic` or one of the types above in the signature of an
+injected function.
 
 ## WebAssembly / Emscripten
 
@@ -356,9 +638,11 @@ For your own natives to work with every mode above:
 
 ## Troubleshooting
 
+First run `haxelib run hl_compile doctor`: it checks the toolchain and the library and tells you what to fix.
+
 | Message / symptom | Cause and fix |
 |---|---|
-| `No output detected. Did you compile with -hl <file>?` | The `--hl` argument is missing. It must be `--hl something.c`. |
+| Nothing happens, no `[hlcompiler]` lines | The compilation has no `--hl` output, so `hl_compile` has nothing to build. Add `--hl bin/main.c` (HashLink/C) or `--hl bin/main.hl` (bytecode VM). |
 | `No .c files found in <dir>` | The `--hl` output does not end in `.c`, so Haxe did not generate HashLink/C. |
 | `vswhere.exe not found` / `could not find a Visual Studio installation` | Install Visual Studio or Build Tools with the *Desktop development with C++* workload. |
 | `<x>.hdll contains its own copy of the HashLink runtime` | The hdll was built with the runtime linked in. Rebuild it with a current `hl_glfw` / `hl_glad`, or your own library following [the rules](#writing-native-libraries-for-hl_compile). |
@@ -371,8 +655,16 @@ For your own natives to work with every mode above:
 
 ## Limitations
 
-- HashLink/C only (`--hl file.c`). The JIT/bytecode target does not need this library.
-- The executable is rebuilt from scratch on every run; there is no incremental C build.
+- Not implemented: Windows icon and version resources, AppImage packaging, and a single-file executable for
+  bytecode mode. Packaging copies the files of the build folder.
+- The standard hdlls of the HashLink repository (`fmt`, `sdl`, `ssl`, `openal`, ...) are not built by this
+  library. They are meant to come from separate libraries that ship an `hl_module.xml`.
+- Tested on Linux only. Windows (MSVC) and macOS code paths are written against the toolchains but have not
+  been run; `.github/workflows/ci.yml` runs `tests/smoke.sh` on all three.
+
+- Two modes: HashLink/C (`--hl file.c`) and bytecode on a precompiled VM (`--hl file.hl`, x86-64 only).
+- The native build is incremental: split compilation with a compile cache, and an up-to-date check that skips
+  hxcpp when nothing changed (`-D hl_force` rebuilds). In VM mode each hdll has its own check.
 - Cross compilation depends on the toolchain you provide; `hl_force_*` only selects the target, it does not
   install one.
 - Extra compiler/linker flags cannot be passed through a define. The `.deps` mechanism covers link-time
@@ -386,8 +678,18 @@ hl_compile/
 ├─ haxelib.json
 ├─ extraParams.hxml          registers the macro (--macro hlcompiler.HlCompiler.init())
 ├─ hlcompiler/
-│  └─ HlCompiler.hx          the whole build pipeline
-├─ BuildHashlink.xml         builds the HashLink runtime (DLL on Windows, static elsewhere)
+│  ├─ HlCompiler.hx          the whole build pipeline (modules, VM mode, hdlls)
+│  ├─ HlBytecode.hx          reads the native table of a .hl file
+│  ├─ macros/
+│  │  └─ NativeExecutionMacro.hx   @:injectHeaderCode / @:injectNativeFunction
+│  └─ cli/                   `haxelib run hl_compile` (doctor, build, run, watch, ...)
+├─ tests/
+│  ├─ smoke.sh               builds tests/smoke in both modes and checks the output
+│  └─ smoke/                 a small app, a module (fw/) and a natives/ folder
+├─ .github/workflows/ci.yml  runs the smoke test on Linux, Windows and macOS
+├─ BuildHashlink.xml         builds the HashLink runtime (DLL on Windows, static elsewhere) and the VM
+├─ vm/
+│  └─ launcher.c             entry point of the VM executable (finds hlboot.dat next to it)
 ├─ hashlink/                 HashLink sources (git submodule)
 └─ libs/<Os><Arch>/          runtime built on first use (generated, not versioned)
 ```

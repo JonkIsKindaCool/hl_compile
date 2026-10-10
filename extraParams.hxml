@@ -1,1 +1,2 @@
+--macro addGlobalMetadata('', '@:build(hlcompiler.macros.NativeExecutionMacro.build())')
 --macro hlcompiler.HlCompiler.init()

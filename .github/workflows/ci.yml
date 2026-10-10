@@ -1,0 +1,39 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  smoke:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Linux, os: ubuntu-latest, experimental: false }
+          - { name: Windows, os: windows-latest, experimental: false }
+          # The macOS runners are mostly Apple Silicon, where only HashLink/C mode applies.
+          - { name: macOS, os: macos-latest, experimental: true }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: 4.3.6
+
+      - name: Install hxcpp
+        run: haxelib install hxcpp --always
+
+      - name: Register hl_compile
+        run: haxelib dev hl_compile .
+
+      - name: Check the toolchain
+        run: haxelib run hl_compile doctor
+
+      - name: Smoke test (HashLink/C and bytecode VM)
+        shell: bash
+        run: bash tests/smoke.sh

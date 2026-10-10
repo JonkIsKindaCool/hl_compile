@@ -7,6 +7,7 @@ import sys.io.File;
 import sys.io.Process;
 import haxe.macro.Context;
 import haxe.macro.Compiler;
+import hlcompiler.HlBytecode;
 
 using StringTools;
 
@@ -21,8 +22,23 @@ typedef NativeLibs = {
 	var statics:Array<NativeLib>;
 	var dynamics:Array<NativeLib>;
 	var shadowed:Array<NativeLib>;
-	var staticDir:String;
-	var dynamicDir:String;
+	var dynamicDirs:Array<String>;
+}
+
+typedef HdllUnit = {
+	var name:String;
+	var filesXml:String;
+	var targetXml:String;
+	var globalsXml:String;
+	var stamp:Array<String>;
+	var includeDirs:Array<String>;
+}
+
+typedef HlModule = {
+	var name:String;
+	var dir:String;
+	var file:String;
+	var root:Xml;
 }
 
 class HlCompiler {
@@ -39,7 +55,11 @@ class HlCompiler {
 	static inline var TAG:String = "hlcompiler";
 
 	public static function init():Void {
+		Compiler.registerCustomMetadata({metadata: ":injectNativeFunction", doc: "Injects a native function to the final c++ compilation"});
+
 		nativeLibsCache = null;
+		modulesCache = null;
+		pkgCache = new Map();
 		haxelibPath = getHaxelibPath();
 
 		if (Context.defined("hl_force_webassembly")
@@ -114,7 +134,24 @@ class HlCompiler {
 	}
 
 	static function build():Void {
+		var output:String = Compiler.getOutput();
+		if (output == null || output == "")
+			return;
+
 		var old:String = Sys.getCwd();
+
+		if (!FileSystem.exists(Path.join([hlIncludeDir, "hl.h"])))
+			fail('HashLink sources not found in $hlIncludeDir.\n'
+				+ '  The hashlink/ folder is a git submodule: run "git submodule update --init --recursive" in $haxelibPath\n'
+				+ '  (or "haxelib run hl_compile doctor" to check everything).');
+
+		var vm:Bool = isVmOutput();
+		if (vm && os == "WebAssembly")
+			fail('VM mode (--hl <file>.hl) is not available for WebAssembly: the HashLink VM needs a JIT. Use --hl <file>.c instead.');
+		if (vm && arch != "64")
+			fail('VM mode (--hl <file>.hl) needs x86-64: the HashLink JIT does not support this architecture. Use --hl <file>.c instead.');
+
+		getModules();
 
 		if (!isHashlinkCompiled()) {
 			info('Hashlink runtime not found. Building it first...');
@@ -138,12 +175,18 @@ class HlCompiler {
 		info('Target platform: $os' + (arch != "" ? ' ($arch)' : ''));
 		info('Output directory: $outputDir');
 
+		if (vm) {
+			buildVm(old, outputDir);
+			info('Build completed successfully.');
+			return;
+		}
+
 		var cacheDir:String = resolveCacheDir(outputDir);
 		var xmlPath:String = generateBuildXml(old, outputDir, cacheDir != null);
 
 		var stampFile:String = Path.join([outputDir, ".hlc_stamp"]);
 		var exeFile:String = Path.join([outputDir, "build", folder, exeFileName()]);
-		var stamp:String = computeStamp(outputDir, xmlPath, resolveNativeLibs(old));
+		var stamp:String = computeStamp(outputDir, xmlPath, resolveNativeLibs(old), old);
 
 		if (!Context.defined("hl_force") && FileSystem.exists(exeFile) && FileSystem.exists(stampFile) && File.getContent(stampFile) == stamp) {
 			info('Up to date: nothing changed since the last build, native build skipped (-D hl_force to rebuild).');
@@ -155,6 +198,7 @@ class HlCompiler {
 		}
 
 		copyHdlls(old, outputDir);
+		copyModuleFiles(outputDir);
 		info('Build completed successfully.');
 	}
 
@@ -194,6 +238,7 @@ class HlCompiler {
 	}
 
 	static var nativeLibsCache:NativeLibs = null;
+	static var modulesCache:Array<HlModule> = null;
 
 	static inline function staticLibExt():String {
 		return os == "Windows" ? "lib" : "a";
@@ -223,47 +268,74 @@ class HlCompiler {
 		if (nativeLibsCache != null)
 			return nativeLibsCache;
 
-		var root:String = Path.join([p, "hdlls"]);
-		var staticDir:String = Path.join([root, "static", folder]);
-		var dynamicDir:String = Path.join([root, "dynamic", folder]);
+		var roots:Array<{root:String, owner:String}> = [{root: Path.join([p, "hdlls"]), owner: "project"}];
+		for (r in moduleHdllRoots())
+			roots.push(r);
 
-		var split:Bool = FileSystem.exists(Path.join([root, "static"])) || FileSystem.exists(Path.join([root, "dynamic"]));
-		var legacyDir:String = Path.join([root, folder]);
-		if (!split && FileSystem.exists(legacyDir)) {
-			info('Old hdlls layout found ($legacyDir): treating it as dynamic. Move it to hdlls/dynamic/$folder.');
-			dynamicDir = legacyDir;
+		var rootDirs:Array<{staticDir:String, dynamicDir:String, owner:String}> = [];
+		for (r in roots) {
+			var staticDir:String = Path.join([r.root, "static", folder]);
+			var dynamicDir:String = Path.join([r.root, "dynamic", folder]);
+
+			var split:Bool = FileSystem.exists(Path.join([r.root, "static"])) || FileSystem.exists(Path.join([r.root, "dynamic"]));
+			var legacyDir:String = Path.join([r.root, folder]);
+			if (!split && FileSystem.exists(legacyDir)) {
+				info('Old hdlls layout found ($legacyDir): treating it as dynamic. Move it to ${Path.join([r.root, "dynamic", folder])}.');
+				dynamicDir = legacyDir;
+			}
+			rootDirs.push({staticDir: staticDir, dynamicDir: dynamicDir, owner: r.owner});
 		}
 
 		var statics:Array<NativeLib> = [];
 		var staticIds:Map<String, String> = new Map();
-		for (f in listFilesWithExt(staticDir, staticLibExt())) {
-			var id:String = nativeLibId(f, true);
-			if (staticIds.exists(id))
-				fail('Static libs "${staticIds.get(id)}" and "$f" in $staticDir are the same library ("$id"). Keep only one.');
-			staticIds.set(id, f);
-			statics.push({
-				id: id,
-				fileName: f,
-				path: Path.join([staticDir, f]),
-				isStatic: true
-			});
+		var staticFiles:Map<String, String> = new Map();
+		for (rd in rootDirs) {
+			var local:Map<String, String> = new Map();
+			for (f in listFilesWithExt(rd.staticDir, staticLibExt())) {
+				var id:String = nativeLibId(f, true);
+				if (local.exists(id))
+					fail('Static libs "${local.get(id)}" and "$f" in ${rd.staticDir} are the same library ("$id"). Keep only one.');
+				local.set(id, f);
+				if (staticIds.exists(id)) {
+					info('Static "$id" ($f, ${rd.owner}) ignored: already provided by ${staticIds.get(id)}.');
+					continue;
+				}
+				staticIds.set(id, rd.owner);
+				staticFiles.set(id, f);
+				statics.push({
+					id: id,
+					fileName: f,
+					path: Path.join([rd.staticDir, f]),
+					isStatic: true
+				});
+			}
 		}
 
 		var dynamics:Array<NativeLib> = [];
 		var shadowed:Array<NativeLib> = [];
-		for (f in listFilesWithExt(dynamicDir, "hdll")) {
-			var id:String = nativeLibId(f, false);
-			var lib:NativeLib = {
-				id: id,
-				fileName: f,
-				path: Path.join([dynamicDir, f]),
-				isStatic: false
-			};
-			if (staticIds.exists(id)) {
-				info('"$id" exists as static (${staticIds.get(id)}) and dynamic ($f): linking the static one only.');
-				shadowed.push(lib);
-			} else {
-				dynamics.push(lib);
+		var dynamicIds:Map<String, String> = new Map();
+		var dynamicDirs:Array<String> = [];
+		for (rd in rootDirs) {
+			if (FileSystem.exists(rd.dynamicDir) && FileSystem.isDirectory(rd.dynamicDir))
+				dynamicDirs.push(rd.dynamicDir);
+			for (f in listFilesWithExt(rd.dynamicDir, "hdll")) {
+				var id:String = nativeLibId(f, false);
+				var lib:NativeLib = {
+					id: id,
+					fileName: f,
+					path: Path.join([rd.dynamicDir, f]),
+					isStatic: false
+				};
+				if (staticIds.exists(id)) {
+					info('"$id" exists as static (${staticFiles.get(id)}) and dynamic ($f): linking the static one only.');
+					shadowed.push(lib);
+				} else if (dynamicIds.exists(id)) {
+					info('Dynamic "$id" ($f, ${rd.owner}) ignored: already provided by ${dynamicIds.get(id)}.');
+					shadowed.push(lib);
+				} else {
+					dynamicIds.set(id, rd.owner);
+					dynamics.push(lib);
+				}
 			}
 		}
 
@@ -281,8 +353,7 @@ class HlCompiler {
 			statics: statics,
 			dynamics: dynamics,
 			shadowed: shadowed,
-			staticDir: staticDir,
-			dynamicDir: dynamicDir
+			dynamicDirs: dynamicDirs
 		};
 		return nativeLibsCache;
 	}
@@ -329,12 +400,12 @@ class HlCompiler {
 	static function exeFileName():String {
 		var exeName:String = Context.definedValue("hl_exe_name");
 		if (exeName == null)
-			exeName = "output";
+			exeName = os == "WebAssembly" ? "index" : "output";
 		return exeName + switch (os) {
 			case "Windows": ".exe";
-			case "WebAssembly": ".js";
+			case "WebAssembly": ".html";
 			default: "";
-		};
+		}
 	}
 
 	static function readHlcFiles(outputDir:String):Array<String> {
@@ -424,7 +495,48 @@ class HlCompiler {
 		}
 	}
 
-	static function computeStamp(outputDir:String, xmlPath:String, nativeLibs:NativeLibs):String {
+	static function collectStampNatives(dir:String, rel:String, out:Array<String>):Void {
+		var items:Array<String> = FileSystem.readDirectory(dir);
+		items.sort(Reflect.compare);
+		for (item in items) {
+			if (item.startsWith("."))
+				continue;
+			var full:String = Path.join([dir, item]);
+			var r:String = rel == "" ? item : rel + "/" + item;
+			if (FileSystem.isDirectory(full)) {
+				collectStampNatives(full, r, out);
+			} else {
+				var ext:String = Path.extension(item).toLowerCase();
+				if (ext == "c" || ext == "cpp" || ext == "c++" || ext == "cc" || ext == "h" || ext == "hpp")
+					out.push(statLine(full));
+			}
+		}
+	}
+
+	static inline function nativeStaticLibExt():String {
+		return os == "Windows" ? "lib" : "a";
+	}
+
+	static function collectNativeStaticLibs(dir:String):Array<String> {
+		var out:Array<String> = [];
+		if (!FileSystem.exists(dir) || !FileSystem.isDirectory(dir))
+			return out;
+
+		var ext:String = nativeStaticLibExt();
+		for (f in FileSystem.readDirectory(dir)) {
+			var full:String = Path.join([dir, f]);
+			if (FileSystem.isDirectory(full)) {
+				for (sub in collectNativeStaticLibs(full))
+					out.push(sub);
+			} else if (Path.extension(f).toLowerCase() == ext) {
+				out.push(full);
+			}
+		}
+		out.sort(Reflect.compare);
+		return out;
+	}
+
+	static function computeStamp(outputDir:String, xmlPath:String, nativeLibs:NativeLibs, projectPath:String):String {
 		var parts:Array<String> = [
 			File.getContent(Path.join([outputDir, xmlPath])),
 			os,
@@ -432,6 +544,14 @@ class HlCompiler {
 			Std.string(Context.defined("hl_fast"))
 		];
 		collectStamp(outputDir, "", parts);
+
+		var nativesDir:String = Path.join([projectPath, "natives"]);
+		if (FileSystem.exists(nativesDir))
+			collectStampNatives(nativesDir, "", parts);
+
+		for (m in getModules())
+			collectModuleStamp(m, parts);
+
 		parts.push(statLine(hlLibFile));
 		parts.push(statLine(hlDllFile));
 		for (l in nativeLibs.statics.concat(nativeLibs.dynamics)) {
@@ -446,16 +566,17 @@ class HlCompiler {
 			return null;
 		var dir:String = Context.definedValue("hl_cache");
 		if (dir == null || dir == "1" || dir == "")
+			dir = Sys.getEnv("HL_COMPILE_CACHE");
+		if (dir == null || dir == "")
 			dir = Path.join([outputDir, ".hlc_cache"]);
-		if (!FileSystem.exists(dir))
-			FileSystem.createDirectory(dir);
+		ensureDir(FileSystem.absolutePath(dir));
 		return FileSystem.absolutePath(dir).replace("\\", "/");
 	}
 
 	static function generateBuildXml(p:String, outputDir:String, useCache:Bool = false):String {
 		var exeName:String = Context.definedValue("hl_exe_name");
 		if (exeName == null)
-			exeName = "output";
+			exeName = os == "WebAssembly" ? "index" : "output";
 
 		var split:Bool = !Context.defined("hl_unity");
 		var cFiles:Array<String> = split ? readHlcFiles(outputDir) : [];
@@ -484,7 +605,10 @@ class HlCompiler {
 		if (os == "WebAssembly") {
 			buf.add('    <set name="emscripten" value="1" />\n');
 		}
-		buf.add('    <set name="BUILD_DIR" value="build/$folder" />\n\n');
+		buf.add('    <set name="BUILD_DIR" value="build/$folder" />\n');
+		buf.add('    <set name="HL_FOLDER" value="$folder" />\n');
+		buf.add('    <set name="HL_INCLUDE" value="$hlIncludeDir" />\n');
+		addModuleGlobals(buf);
 
 		buf.add('    <files id="hlc">\n');
 		buf.add('        <compilerflag value="-I$hlIncludeDir" />\n');
@@ -516,7 +640,41 @@ class HlCompiler {
 			for (f in cFiles)
 				buf.add('        <file name="$f" />\n');
 		}
+		addUserCFlags(buf);
+		addModuleFiles(buf, "hlc");
 		buf.add('    </files>\n\n');
+
+		buf.add('    <files id="natives">\n');
+		buf.add('        <compilerflag value="-I$hlIncludeDir" />\n');
+		buf.add('        <compilerflag value="-DHL_COMPILE_HLC" />\n');
+		addUserCFlags(buf);
+
+		var natives_path:String = Path.join([p, "natives"]);
+		if (FileSystem.exists(natives_path)) {
+			buf.add('        <compilerflag value="-I$natives_path" />\n');
+			addFilesRecursively(natives_path, buf);
+		}
+
+		var injections_path:String = Path.join([p, outputDir, "injections"]);
+		if (FileSystem.exists(injections_path)) {
+			buf.add('        <compilerflag value="-I$injections_path" />\n');
+			addFilesRecursively(injections_path, buf);
+		}
+		if (useCache) {
+			buf.add('        <cache value="true" project="natives" />\n');
+			var headerDirs:Array<String> = [natives_path, injections_path];
+			for (m in getModules())
+				headerDirs = headerDirs.concat(moduleIncludeDirs(m));
+			addHeaderDepends(buf, headerDirs);
+		}
+		addModuleFiles(buf, "natives");
+		buf.add('    </files>\n\n');
+
+		var nativeStaticLibs:Array<String> = collectNativeStaticLibs(natives_path);
+		if (nativeStaticLibs.length > 0) {
+			info('Linking user static libs from natives/: ${nativeStaticLibs.length} file(s)');
+		}
+
 		info((split ? 'Split build: ' : 'Single-file build: ')
 			+ cFiles.length
 			+ ' C file(s)'
@@ -530,7 +688,7 @@ class HlCompiler {
 			}
 			buf.add('        <ext value=".exe" />\n');
 		} else if (os == "WebAssembly") {
-			buf.add('        <ext value=".js" />\n');
+			buf.add('        <ext value=".html" />\n');
 			if (!Context.defined("hl_fast"))
 				buf.add('        <flag value="-O3" />\n');
 			buf.add('        <flag value="-s" />\n');
@@ -543,7 +701,12 @@ class HlCompiler {
 			buf.add('        <ext value="" />\n');
 		}
 		buf.add("        <outdir name=\"${BUILD_DIR}\" />\n");
-		buf.add('        <files id="hlc" />\n\n');
+		addUserLinkFlags(buf);
+		buf.add('        <files id="hlc" />\n');
+		buf.add('        <files id="natives" />\n\n');
+
+		for (nl in nativeStaticLibs)
+			buf.add('        <lib name="$nl" />\n');
 
 		if (os == "Windows") {
 			for (hdll in nativeLibs.dynamics) {
@@ -560,6 +723,9 @@ class HlCompiler {
 			buf.add('        <lib name="gdi32.lib" />\n');
 			buf.add('        <lib name="shell32.lib" />\n');
 			buf.add('        <lib name="opengl32.lib" />\n');
+			buf.add('        <lib name="setupapi.lib" />\n');
+			buf.add('        <lib name="version.lib" />\n');
+			buf.add('        <lib name="imm32.lib" />\n');
 			addStaticDeps(buf, staticDeps, [
 				"delayimp.lib",
 				"winmm.lib",
@@ -568,10 +734,16 @@ class HlCompiler {
 				"shell32.lib",
 				"opengl32.lib"
 			]);
+			addModuleTarget(buf);
 		} else if (os == "WebAssembly") {
 			for (sl in nativeLibs.statics)
 				buf.add('        <lib name="${sl.path}" />\n');
+			addModuleTarget(buf);
 			buf.add('        <lib name="$hlLibFile" />\n');
+			if (Context.defined("hl_sdl3")) {
+				buf.add('		 <flag value="-s"/>\n');
+				buf.add('		 <flag value="USE_SDL=3"/>\n');
+			}
 			addStaticDeps(buf, staticDeps, []);
 		} else {
 			if (os == "Mac") {
@@ -594,10 +766,10 @@ class HlCompiler {
 				"-framework OpenGL",
 				"-framework IOKit"
 			]);
+			addModuleTarget(buf);
 
 			buf.add('        <lib name="-lm" />\n');
 			buf.add('        <lib name="-lpthread" if="linux" />\n');
-			buf.add('		<lib name="-luv" if="linux" />\n');
 			buf.add('        <lib name="-ldl" if="linux" />\n');
 			buf.add('        <lib name="-llog" if="android" />\n');
 
@@ -829,60 +1001,36 @@ class HlCompiler {
 
 	static function copyHdlls(projectPath:String, outputDir:String):Void {
 		var nativeLibs:NativeLibs = resolveNativeLibs(projectPath);
-		var hdllsDir:String = nativeLibs.dynamicDir;
 		var targetDir:String = Path.join([outputDir, "build", folder]);
 
 		if (os == "Windows" && FileSystem.exists(hlDllFile)) {
-			if (!FileSystem.exists(targetDir))
-				FileSystem.createDirectory(targetDir);
-			File.copy(hlDllFile, Path.join([targetDir, "libhl.dll"]));
-			info('Copied runtime: libhl.dll -> $targetDir');
+			ensureDir(targetDir);
+			if (copyIfChanged(hlDllFile, Path.join([targetDir, "libhl.dll"])))
+				info('Copied runtime: libhl.dll -> $targetDir');
 		}
 
-		if (FileSystem.exists(hdllsDir)) {
-			var shadowed:Array<String> = nativeLibs.shadowed.map(l -> l.fileName);
-			if (!FileSystem.exists(targetDir)) {
-				FileSystem.createDirectory(targetDir);
-			}
+		var shadowed:Array<String> = nativeLibs.shadowed.map(l -> l.path);
+		for (hdllsDir in nativeLibs.dynamicDirs) {
+			ensureDir(targetDir);
 			for (file in FileSystem.readDirectory(hdllsDir)) {
-				if (shadowed.indexOf(file) >= 0)
+				var srcPath:String = Path.join([hdllsDir, file]);
+				if (shadowed.indexOf(srcPath) >= 0)
 					continue;
 				if (file.endsWith(".hdll") || file.endsWith(".dll") || file.endsWith(".so") || file.endsWith(".dylib") || file.endsWith(".wasm")
 					|| file.endsWith(".js")) {
-					var srcPath = Path.join([hdllsDir, file]);
-					var destPath = Path.join([targetDir, file]);
+					var destPath:String = Path.join([targetDir, file]);
 
-					File.copy(srcPath, destPath);
-					info('Copied plugin: $file -> $destPath');
+					if (copyIfChanged(srcPath, destPath))
+						info('Copied plugin: $file -> $destPath');
 				}
 			}
 		}
 	}
 
-	static function compileBuildXml(p:String, xmlPath:String, ?workingDir:String, ?cacheDir:String):Void {
-		var oldCwd:String = Sys.getCwd();
-
-		if (workingDir != null)
-			Sys.setCwd(workingDir);
-
-		var objDir:String = "obj";
-		if (FileSystem.exists(objDir)) {
-			try {
-				deleteDirectoryRecursive(objDir);
-			} catch (e:Dynamic) {
-				info('Could not delete the obj folder: $e');
-			}
-		}
-
-		var exePath:String = Path.join(["build", folder, exeFileName()]);
-
-		if (FileSystem.exists(exePath)) {
-			try {
-				FileSystem.deleteFile(exePath);
-			} catch (e:Dynamic) {}
-		}
-
+	static function hxcppArgs(xmlPath:String, cacheDir:String, target:String):Array<String> {
 		var args:Array<String> = [xmlPath];
+		if (target != null)
+			args.push(target);
 		if (os == "WebAssembly") {
 			args.push("-Demscripten");
 
@@ -917,6 +1065,33 @@ class HlCompiler {
 				args.push("-DHXCPP_NO_DEBUG_LINK");
 			}
 		}
+		return args;
+	}
+
+	static function compileBuildXml(p:String, xmlPath:String, ?workingDir:String, ?cacheDir:String, ?target:String):Void {
+		var oldCwd:String = Sys.getCwd();
+
+		if (workingDir != null)
+			Sys.setCwd(workingDir);
+
+		var objDir:String = "obj";
+		if (FileSystem.exists(objDir)) {
+			try {
+				deleteDirectoryRecursive(objDir);
+			} catch (e:Dynamic) {
+				info('Could not delete the obj folder: $e');
+			}
+		}
+
+		var exePath:String = Path.join(["build", folder, exeFileName()]);
+
+		if (FileSystem.exists(exePath)) {
+			try {
+				FileSystem.deleteFile(exePath);
+			} catch (e:Dynamic) {}
+		}
+
+		var args:Array<String> = hxcppArgs(xmlPath, cacheDir, target);
 
 		var parts:Array<String> = ["haxelib", "run", "hxcpp"];
 		for (a in args)
@@ -932,6 +1107,23 @@ class HlCompiler {
 
 		if (code != 0)
 			fail('hxcpp exited with code $code');
+	}
+
+	static function addFilesRecursively(dirPath:String, buf:StringBuf):Void {
+		if (FileSystem.exists(dirPath) && FileSystem.isDirectory(dirPath)) {
+			for (file in FileSystem.readDirectory(dirPath)) {
+				var fullPath:String = Path.join([dirPath, file]);
+
+				if (FileSystem.isDirectory(fullPath)) {
+					addFilesRecursively(fullPath, buf);
+				} else {
+					var ext:String = Path.extension(fullPath);
+					if (ext == "c" || ext == "c++" || ext == "cpp") {
+						buf.add('        <file name="${fullPath}"/>\n');
+					}
+				}
+			}
+		}
 	}
 
 	static function deleteDirectoryRecursive(dir:String):Void {
@@ -954,11 +1146,948 @@ class HlCompiler {
 		return s;
 	}
 
+	static inline var MODULE_FILE:String = "hl_module.xml";
+
+	static var moduleLocalTags:Array<String> = ["files", "target", "copy", "hdlls", "requires", "pkgconfig"];
+
+	static var moduleGlobalTags:Array<String> = ["set", "unset", "section", "error", "echo"];
+
+	static function getModules():Array<HlModule> {
+		if (modulesCache != null)
+			return modulesCache;
+
+		var found:Array<HlModule> = [];
+		var seen:Map<String, Bool> = new Map();
+
+		function addFile(file:String):Void {
+			if (file == null || seen.exists(file))
+				return;
+			seen.set(file, true);
+			found.push(loadModule(file));
+		}
+
+		for (cp in Context.getClassPath())
+			addFile(findModuleFile(absDir(cp)));
+
+		var projectFile:String = Path.join([absDir(""), MODULE_FILE]);
+		if (FileSystem.exists(projectFile))
+			addFile(projectFile);
+
+		checkModuleRequirements(found);
+		if (found.length > 0)
+			info('Modules: ' + found.map(m -> m.name).join(", "));
+
+		modulesCache = found;
+		return modulesCache;
+	}
+
+	static function absDir(p:String):String {
+		if (p == "")
+			p = "./";
+		return Path.removeTrailingSlashes(Path.normalize(FileSystem.absolutePath(p)));
+	}
+
+	static function findModuleFile(startDir:String):String {
+		var d:String = startDir;
+		for (i in 0...3) {
+			var f:String = Path.join([d, MODULE_FILE]);
+			if (FileSystem.exists(f) && !FileSystem.isDirectory(f))
+				return f;
+			var parent:String = Path.directory(d);
+			if (parent == "" || parent == d)
+				break;
+			d = parent;
+		}
+		return null;
+	}
+
+	static function defaultModuleName(dir:String):String {
+		var n:String = Path.withoutDirectory(dir);
+		if (~/^[0-9]+([,.][0-9]+)*$/.match(n) || n == "git" || n == "dev")
+			n = Path.withoutDirectory(Path.directory(dir));
+		return n;
+	}
+
+	static function moduleVar(m:HlModule):String {
+		return ~/[^A-Za-z0-9_]/g.replace(m.name, "_").toUpperCase();
+	}
+
+	static function loadModule(file:String):HlModule {
+		var dir:String = Path.directory(file);
+		var root:Xml = null;
+		try {
+			root = Xml.parse(File.getContent(file)).firstElement();
+		} catch (e:Dynamic) {
+			fail('Could not parse $file: $e');
+		}
+		if (root == null || root.nodeName != "hlmodule")
+			fail('$file: the root element must be <hlmodule>.');
+
+		var name:String = root.get("name");
+		if (name == null || name.trim() == "")
+			name = defaultModuleName(dir);
+
+		var m:HlModule = {
+			name: name.trim(),
+			dir: dir,
+			file: file,
+			root: root
+		};
+		prepareXml(root, m);
+		return m;
+	}
+
+	static function substVars(s:String, m:HlModule):String {
+		return s.replace("${HLMODULE_DIR}", m.dir)
+			.replace("${HLMODULE_NAME}", m.name)
+			.replace("${HL_FOLDER}", folder)
+			.replace("${HL_INCLUDE}", hlIncludeDir);
+	}
+
+	static function prepareXml(x:Xml, m:HlModule):Void {
+		for (e in x.elements()) {
+			var attrs:Array<String> = [for (n in e.attributes()) n];
+			for (a in attrs)
+				e.set(a, substVars(e.get(a), m));
+			if (e.nodeName == "file" || e.nodeName == "depend" || e.nodeName == "lib")
+				absolutizeName(e, m);
+			prepareXml(e, m);
+		}
+	}
+
+	static function absolutizeName(e:Xml, m:HlModule):Void {
+		var n:String = e.get("name");
+		if (n == null || n == "" || n.startsWith("-") || n.startsWith("${") || Path.isAbsolute(n))
+			return;
+		var full:String = Path.join([m.dir, n]);
+		if (n.indexOf("/") >= 0 || n.indexOf("\\") >= 0 || FileSystem.exists(full))
+			e.set("name", Path.normalize(full));
+	}
+
+	static function resolveModulePath(m:HlModule, p:String):String {
+		return Path.removeTrailingSlashes(Path.normalize(Path.isAbsolute(p) ? p : Path.join([m.dir, p])));
+	}
+
+	static function conditionMet(e:Xml):Bool {
+		var cond:String = e.get("if");
+		if (cond != null && !evalCondition(cond))
+			return false;
+		var neg:String = e.get("unless");
+		if (neg != null && evalCondition(neg))
+			return false;
+		return true;
+	}
+
+	static function evalCondition(expr:String):Bool {
+		for (orPart in expr.split("||")) {
+			var all:Bool = true;
+			for (andPart in orPart.split("&&")) {
+				if (!tokenHolds(andPart.trim())) {
+					all = false;
+					break;
+				}
+			}
+			if (all)
+				return true;
+		}
+		return false;
+	}
+
+	static function tokenHolds(token:String):Bool {
+		var negate:Bool = token.startsWith("!");
+		if (negate)
+			token = token.substr(1).trim();
+		var holds:Bool = switch (token.toLowerCase()) {
+			case "windows": os == "Windows";
+			case "linux": os == "Linux";
+			case "mac" | "macos": os == "Mac";
+			case "android": os == "Android";
+			case "ios" | "iphone": os == "iPhone";
+			case "emscripten" | "webassembly" | "wasm": os == "WebAssembly";
+			case "x64" | "m64": arch == "64";
+			case "x86" | "m32": arch == "32";
+			case "arm64": arch == "Arm64";
+			case "arm7": arch == "Arm7";
+			default: Context.defined(token);
+		};
+		return negate ? !holds : holds;
+	}
+
+	static var pkgCache:Map<String, {cflags:Array<String>, libs:Array<String>}> = new Map();
+
+	static function libVersion():String {
+		try {
+			var j:Dynamic = haxe.Json.parse(File.getContent(Path.join([haxelibPath, "haxelib.json"])));
+			return Std.string(j.version);
+		} catch (e:Dynamic) {
+			return "0.0.0";
+		}
+	}
+
+	static function compareVersions(a:String, b:String):Int {
+		var pa:Array<String> = a.split(".");
+		var pb:Array<String> = b.split(".");
+		for (i in 0...Std.int(Math.max(pa.length, pb.length))) {
+			var x:Int = i < pa.length ? Std.parseInt(pa[i]) : 0;
+			var y:Int = i < pb.length ? Std.parseInt(pb[i]) : 0;
+			if (x == null)
+				x = 0;
+			if (y == null)
+				y = 0;
+			if (x != y)
+				return x < y ? -1 : 1;
+		}
+		return 0;
+	}
+
+	static function checkModuleRequirements(modules:Array<HlModule>):Void {
+		var names:Map<String, Bool> = new Map();
+		for (m in modules)
+			names.set(m.name, true);
+
+		for (m in modules) {
+			for (r in m.root.elements()) {
+				if (r.nodeName != "requires" || !conditionMet(r))
+					continue;
+				var mod:String = r.get("module");
+				if (mod != null && !names.exists(mod))
+					fail('Module "${m.name}" (${m.file}) requires the module "$mod", which was not found.\n  Add the library that provides it (--library ...).');
+				var def:String = r.get("define");
+				if (def != null && !Context.defined(def))
+					fail('Module "${m.name}" (${m.file}) requires -D $def.');
+				var v:String = r.get("hl_compile");
+				if (v != null && compareVersions(libVersion(), v) < 0)
+					fail('Module "${m.name}" (${m.file}) requires hl_compile $v or newer (this is ${libVersion()}).');
+			}
+		}
+	}
+
+	static function pkgConfig(name:String):{cflags:Array<String>, libs:Array<String>} {
+		if (name == null || name == "")
+			fail('<pkgconfig> needs a "name" attribute.');
+		if (pkgCache.exists(name))
+			return pkgCache.get(name);
+
+		function query(flag:String):Array<String> {
+			var out:String = "";
+			var err:String = "";
+			var code:Int = -1;
+			try {
+				var p:Process = new Process("pkg-config", [flag, name]);
+				out = p.stdout.readAll().toString();
+				err = p.stderr.readAll().toString();
+				code = p.exitCode();
+				p.close();
+			} catch (e:Dynamic) {
+				fail('pkg-config is not available ($e).\n  Install it (Linux: pkg-config, macOS: brew install pkg-config), or describe the library with <lib>/<files> and an if="..." condition.');
+			}
+			if (code != 0)
+				fail('pkg-config $flag $name failed: ${err.trim()}\n  Is the development package for "$name" installed?');
+			return [for (t in out.trim().split(" ")) if (t.trim() != "") t.trim()];
+		}
+
+		var libs:Array<String> = [];
+		var raw:Array<String> = query("--libs");
+		var i:Int = 0;
+		while (i < raw.length) {
+			if (raw[i] == "-framework" && i + 1 < raw.length) {
+				libs.push("-framework " + raw[i + 1]);
+				i += 2;
+			} else {
+				libs.push(raw[i]);
+				i++;
+			}
+		}
+
+		var res:{cflags:Array<String>, libs:Array<String>} = {cflags: query("--cflags"), libs: libs};
+		pkgCache.set(name, res);
+		return res;
+	}
+
+	static function moduleGlobalsText(m:HlModule):String {
+		var buf:StringBuf = new StringBuf();
+		for (e in m.root.elements()) {
+			var rawGroup:Bool = e.nodeName == "files" && e.get("id") != null;
+			if (rawGroup || moduleGlobalTags.indexOf(e.nodeName) >= 0)
+				buf.add('    ' + e.toString() + '\n');
+			else if (moduleLocalTags.indexOf(e.nodeName) < 0)
+				info('Warning: ${m.name}: unknown element <${e.nodeName}> in ${MODULE_FILE} was ignored.');
+		}
+		return buf.toString();
+	}
+
+	static function addModuleGlobals(buf:StringBuf):Void {
+		var modules:Array<HlModule> = getModules();
+		for (m in modules)
+			buf.add('    <set name="HLMODULE_${moduleVar(m)}_DIR" value="${m.dir}" />\n');
+		for (m in modules)
+			buf.add(moduleGlobalsText(m));
+		buf.add('\n');
+	}
+
+	static function moduleFilesText(m:HlModule, group:String):String {
+		var buf:StringBuf = new StringBuf();
+		for (b in m.root.elements()) {
+			if (b.nodeName != "files" || b.get("id") != null || !conditionMet(b))
+				continue;
+			var g:String = b.get("group");
+			if (g == null)
+				g = "natives";
+			if (g != "natives" && g != "hlc")
+				fail('${m.file}: <files group="$g"> is not valid (use "natives" or "hlc").');
+			if (g != group)
+				continue;
+			for (c in b.elements())
+				buf.add('        ' + c.toString() + '\n');
+		}
+		if (group == "natives") {
+			for (b in m.root.elements())
+				if (b.nodeName == "pkgconfig" && conditionMet(b))
+					for (f in pkgConfig(b.get("name")).cflags)
+						buf.add('        <compilerflag value="${StringTools.htmlEscape(f, true)}" />\n');
+		}
+		return buf.toString();
+	}
+
+	static function addModuleFiles(buf:StringBuf, group:String):Void {
+		for (m in getModules())
+			buf.add(moduleFilesText(m, group));
+	}
+
+	static function moduleTargetText(m:HlModule):String {
+		var buf:StringBuf = new StringBuf();
+		for (b in m.root.elements()) {
+			if (b.nodeName != "target" || !conditionMet(b))
+				continue;
+			for (c in b.elements())
+				buf.add('        ' + c.toString() + '\n');
+		}
+		for (b in m.root.elements())
+			if (b.nodeName == "pkgconfig" && conditionMet(b))
+				for (l in pkgConfig(b.get("name")).libs)
+					buf.add('        <lib name="${StringTools.htmlEscape(l, true)}" />\n');
+		return buf.toString();
+	}
+
+	static function addModuleTarget(buf:StringBuf):Void {
+		for (m in getModules())
+			buf.add(moduleTargetText(m));
+	}
+
+	static function moduleHdllRoots():Array<{root:String, owner:String}> {
+		var out:Array<{root:String, owner:String}> = [];
+		for (m in getModules()) {
+			for (b in m.root.elements()) {
+				if (b.nodeName != "hdlls" || !conditionMet(b))
+					continue;
+				var d:String = b.get("dir");
+				if (d == null || d == "")
+					fail('${m.file}: <hdlls> needs a "dir" attribute.');
+				out.push({root: resolveModulePath(m, d), owner: m.name});
+			}
+		}
+		return out;
+	}
+
+	static function ensureDir(dir:String):Void {
+		if (dir == "" || FileSystem.exists(dir))
+			return;
+		var parent:String = Path.directory(dir);
+		if (parent != "" && parent != dir)
+			ensureDir(parent);
+		FileSystem.createDirectory(dir);
+	}
+
+	static function copyRecursive(src:String, dst:String):Bool {
+		var changed:Bool = false;
+		if (FileSystem.isDirectory(src)) {
+			ensureDir(dst);
+			for (item in FileSystem.readDirectory(src))
+				if (copyRecursive(Path.join([src, item]), Path.join([dst, item])))
+					changed = true;
+		} else {
+			ensureDir(Path.directory(dst));
+			changed = copyIfChanged(src, dst);
+		}
+		return changed;
+	}
+
+	static function copyModuleFiles(outputDir:String):Void {
+		var targetDir:String = Path.join([outputDir, "build", folder]);
+		for (m in getModules()) {
+			for (b in m.root.elements()) {
+				if (b.nodeName != "copy" || !conditionMet(b))
+					continue;
+				var from:String = b.get("from");
+				if (from == null || from == "")
+					fail('${m.file}: <copy> needs a "from" attribute.');
+				var src:String = resolveModulePath(m, from);
+				if (!FileSystem.exists(src)) {
+					if (b.get("optional") == "true")
+						continue;
+					fail('${m.name}: <copy from="$from"> not found: $src');
+				}
+				var to:String = b.get("to");
+				var dstDir:String = (to == null || to == "") ? targetDir : Path.join([targetDir, to]);
+				var changed:Bool = FileSystem.isDirectory(src) ? copyRecursive(src,
+					dstDir) : copyRecursive(src, Path.join([dstDir, Path.withoutDirectory(src)]));
+				if (changed)
+					info('Copied (${m.name}): ${Path.withoutDirectory(src)} -> $dstDir');
+			}
+		}
+	}
+
+	static function collectModuleStamp(m:HlModule, out:Array<String>):Void {
+		out.push(statLine(m.file));
+		stampXmlFiles(m.root, out);
+		for (d in moduleIncludeDirs(m))
+			collectStampNatives(d, "", out);
+		for (b in m.root.elements()) {
+			if (b.nodeName == "copy" && b.get("from") != null) {
+				var src:String = resolveModulePath(m, b.get("from"));
+				if (FileSystem.exists(src) && !FileSystem.isDirectory(src))
+					out.push(statLine(src));
+			}
+		}
+	}
+
+	static function moduleIncludeDirs(m:HlModule):Array<String> {
+		var seen:Map<String, Bool> = new Map();
+		var out:Array<String> = [];
+		collectIncludeDirs(m.root, seen, out);
+		return out;
+	}
+
+	static function collectIncludeDirs(x:Xml, seen:Map<String, Bool>, out:Array<String>):Void {
+		for (e in x.elements()) {
+			var v:String = e.get("value");
+			if (e.nodeName == "compilerflag" && v != null && v.startsWith("-I")) {
+				var d:String = Path.removeTrailingSlashes(Path.normalize(v.substr(2).trim()));
+				if (!seen.exists(d) && d != hlIncludeDir && FileSystem.exists(d) && FileSystem.isDirectory(d)) {
+					seen.set(d, true);
+					out.push(d);
+				}
+			}
+			collectIncludeDirs(e, seen, out);
+		}
+	}
+
+	static function stampXmlFiles(x:Xml, out:Array<String>):Void {
+		for (e in x.elements()) {
+			if ((e.nodeName == "file" || e.nodeName == "depend" || e.nodeName == "lib") && e.get("name") != null) {
+				var n:String = e.get("name");
+				if (FileSystem.exists(n) && !FileSystem.isDirectory(n))
+					out.push(statLine(n));
+			}
+			stampXmlFiles(e, out);
+		}
+	}
+
+	static inline var INJECTIONS_HDLL:String = "hashlinkinjections";
+
+	static function isVmOutput():Bool {
+		var output:String = Compiler.getOutput();
+		return output != null && Path.extension(output).toLowerCase() == "hl";
+	}
+
+	static function vmFileName():String {
+		return os == "Windows" ? "hl.exe" : "hl";
+	}
+
+	static function ensureVm():String {
+		var vm:String = Path.join([hlLibDir, vmFileName()]);
+		if (FileSystem.exists(vm))
+			return vm;
+
+		info('HashLink VM not found. Building it first...');
+		var old:String = Sys.getCwd();
+		Sys.setCwd(haxelibPath);
+		compileBuildXml(haxelibPath, "BuildHashlink.xml", null, null, "vm");
+		Sys.setCwd(old);
+
+		if (!FileSystem.exists(vm))
+			fail('The HashLink VM was not produced: $vm');
+		return vm;
+	}
+
+	static function splitFlags(v:String):Array<String> {
+		if (v == null || v == "" || v == "1")
+			return [];
+		return [for (f in v.split(" ")) if (f.trim() != "") f.trim()];
+	}
+
+	static function userCFlags():Array<String> {
+		var f:Array<String> = splitFlags(Context.definedValue("hl_cflags"));
+		if (Context.defined("hl_lto"))
+			f.push(os == "Windows" ? "/GL" : "-flto");
+		if (Context.defined("hl_asan") && os != "Windows" && os != "WebAssembly") {
+			f.push("-fsanitize=address");
+			f.push("-fno-omit-frame-pointer");
+		}
+		return f;
+	}
+
+	static function userLinkFlags():Array<String> {
+		var f:Array<String> = splitFlags(Context.definedValue("hl_ldflags"));
+		if (Context.defined("hl_lto"))
+			f.push(os == "Windows" ? "/LTCG" : "-flto");
+		if (Context.defined("hl_asan") && os != "Windows" && os != "WebAssembly")
+			f.push("-fsanitize=address");
+		return f;
+	}
+
+	static function addUserCFlags(buf:StringBuf):Void {
+		for (f in userCFlags())
+			buf.add('        <compilerflag value="${StringTools.htmlEscape(f, true)}" />\n');
+	}
+
+	static function addUserLinkFlags(buf:StringBuf):Void {
+		for (f in userLinkFlags())
+			buf.add('        <flag value="${StringTools.htmlEscape(f, true)}" />\n');
+	}
+
+	static function addHeaderDepends(buf:StringBuf, dirs:Array<String>):Void {
+		var seen:Map<String, Bool> = new Map();
+		function walk(dir:String):Void {
+			if (!FileSystem.exists(dir) || !FileSystem.isDirectory(dir))
+				return;
+			var items:Array<String> = FileSystem.readDirectory(dir);
+			items.sort(Reflect.compare);
+			for (item in items) {
+				if (item.startsWith("."))
+					continue;
+				var full:String = Path.join([dir, item]);
+				if (FileSystem.isDirectory(full)) {
+					walk(full);
+				} else {
+					var ext:String = Path.extension(item).toLowerCase();
+					if ((ext == "h" || ext == "hpp") && !seen.exists(full)) {
+						seen.set(full, true);
+						buf.add('        <depend name="$full" />\n');
+					}
+				}
+			}
+		}
+		for (d in dirs)
+			walk(d);
+	}
+
+	static function copyIfChanged(src:String, dst:String):Bool {
+		if (FileSystem.exists(dst) && FileSystem.stat(dst).size == FileSystem.stat(src).size) {
+			var a:haxe.io.Bytes = File.getBytes(src);
+			var b:haxe.io.Bytes = File.getBytes(dst);
+			if (a.compare(b) == 0)
+				return false;
+		}
+		try {
+			File.copy(src, dst);
+		} catch (e:Dynamic) {
+			fail('Could not write $dst ($e).\n  A running program keeps its files busy: close it and build again.');
+		}
+		return true;
+	}
+
+	static function makeExecutable(path:String):Void {
+		if (Sys.systemName() != "Windows")
+			Sys.command("chmod", ["+x", path]);
+	}
+
+	static function hasNativeSources(dir:String):Bool {
+		if (!FileSystem.exists(dir) || !FileSystem.isDirectory(dir))
+			return false;
+		for (f in FileSystem.readDirectory(dir)) {
+			var full:String = Path.join([dir, f]);
+			if (FileSystem.isDirectory(full)) {
+				if (hasNativeSources(full))
+					return true;
+			} else {
+				var ext:String = Path.extension(f).toLowerCase();
+				if (ext == "c" || ext == "cpp" || ext == "c++")
+					return true;
+			}
+		}
+		return false;
+	}
+
+	static function collectHdllUnits(projectPath:String, absOut:String):Array<HdllUnit> {
+		var units:Array<HdllUnit> = [];
+		var owners:Map<String, String> = new Map();
+
+		function add(u:HdllUnit, owner:String):Void {
+			if (owners.exists(u.name))
+				fail('Both ${owners.get(u.name)} and $owner produce "${u.name}.hdll". Rename one of them.');
+			owners.set(u.name, owner);
+			units.push(u);
+		}
+
+		var natives:String = Path.join([projectPath, "natives"]);
+		var hasNativesDir:Bool = FileSystem.exists(natives) && FileSystem.isDirectory(natives);
+
+		var shared:{
+			files:String,
+			target:String,
+			globals:String,
+			stamp:Array<String>,
+			dirs:Array<String>
+		} = {
+			files: "",
+			target: "",
+			globals: "",
+			stamp: [],
+			dirs: []
+		};
+		for (m in getModules()) {
+			var files:String = moduleFilesText(m, "natives");
+			if (files.indexOf("<file ") >= 0)
+				continue;
+			shared.files += files;
+			shared.target += moduleTargetText(m);
+			shared.globals += moduleGlobalsText(m);
+			collectModuleStamp(m, shared.stamp);
+			shared.dirs = shared.dirs.concat(moduleIncludeDirs(m));
+		}
+
+		function dirUnit(name:String, dir:String):HdllUnit {
+			var incDirs:Array<String> = [dir];
+			if (hasNativesDir && natives != dir)
+				incDirs.push(natives);
+
+			var b:StringBuf = new StringBuf();
+			for (d in incDirs)
+				b.add('        <compilerflag value="-I$d" />\n');
+			addFilesRecursively(dir, b);
+			b.add(shared.files);
+
+			var t:StringBuf = new StringBuf();
+			var stamp:Array<String> = shared.stamp.copy();
+			if (hasNativesDir) {
+				for (l in collectNativeStaticLibs(natives)) {
+					t.add('        <lib name="$l" />\n');
+					stamp.push(statLine(l));
+				}
+			}
+			t.add(shared.target);
+
+			for (d in incDirs)
+				collectStampNatives(d, "", stamp);
+			return {
+				name: name,
+				filesXml: b.toString(),
+				targetXml: t.toString(),
+				globalsXml: shared.globals,
+				stamp: stamp,
+				includeDirs: incDirs.concat(shared.dirs)
+			};
+		}
+
+		var injections:String = Path.join([absOut, "injections"]);
+		var hasInjections:Bool = hasNativeSources(injections);
+		if (hasInjections)
+			add(dirUnit(INJECTIONS_HDLL, injections), "@:injectNativeFunction");
+
+		var hasNativeLibs:Bool = hasNativesDir && collectNativeStaticLibs(natives).length > 0;
+		if (hasNativeSources(natives)) {
+			var n:String = Context.definedValue("hl_natives_hdll");
+			if (n == null || n == "" || n == "1")
+				n = "natives";
+			add(dirUnit(n, natives), "natives/");
+			if (hasInjections && hasNativeLibs)
+				info('The static libraries of natives/ are linked into both $INJECTIONS_HDLL.hdll and $n.hdll: each hdll has its own copy of their state. '
+					+ 'Keep the code that uses one of them in a single place.');
+		}
+
+		for (m in getModules()) {
+			var files:String = moduleFilesText(m, "natives");
+			if (files.indexOf("<file ") < 0)
+				continue;
+			var stamp:Array<String> = [];
+			collectModuleStamp(m, stamp);
+			add({
+				name: m.name,
+				filesXml: files,
+				targetXml: moduleTargetText(m),
+				globalsXml: moduleGlobalsText(m),
+				stamp: stamp,
+				includeDirs: moduleIncludeDirs(m)
+			}, 'module ${m.name}');
+		}
+
+		return units;
+	}
+
+	static function hdllXml(u:HdllUnit, useCache:Bool):String {
+		var b:StringBuf = new StringBuf();
+		b.add('<xml>\n');
+		b.add('    <set name="HL_FOLDER" value="$folder" />\n');
+		b.add('    <set name="HL_INCLUDE" value="$hlIncludeDir" />\n');
+		for (m in getModules())
+			b.add('    <set name="HLMODULE_${moduleVar(m)}_DIR" value="${m.dir}" />\n');
+		b.add(u.globalsXml);
+
+		b.add('    <files id="sources">\n');
+		b.add('        <compilerflag value="-I$hlIncludeDir" />\n');
+		b.add('        <compilerflag value="-DHL_COMPILE_VM" />\n');
+		addUserCFlags(b);
+		if (useCache) {
+			b.add('        <cache value="true" project="hdll_${u.name}" />\n');
+			addHeaderDepends(b, u.includeDirs);
+		}
+		b.add(u.filesXml);
+		b.add('    </files>\n\n');
+
+		b.add('    <target id="default" tool="linker" toolid="dll" output="${u.name}" rebuild="true">\n');
+		b.add('        <ext value=".hdll" />\n');
+		b.add('        <outdir name="out" />\n');
+		addUserLinkFlags(b);
+		b.add('        <files id="sources" />\n');
+		if (os == "Windows") {
+			b.add('        <flag value="/NOIMPLIB" />\n');
+			b.add('        <lib name="$hlLibFile" />\n');
+		} else if (os == "Mac") {
+			b.add('        <lib name="-Wl,-undefined,dynamic_lookup" />\n');
+		} else {
+			b.add('        <lib name="-Wl,-z,undefs" />\n');
+		}
+		b.add(u.targetXml);
+		b.add('    </target>\n');
+		b.add('</xml>\n');
+		return b.toString();
+	}
+
+	static function buildHdllUnits(units:Array<HdllUnit>, absOut:String, cacheDir:String):Array<String> {
+		var results:Array<String> = [];
+		var stale:Array<{
+			u:HdllUnit,
+			dir:String,
+			hdll:String,
+			stamp:String,
+			stampFile:String
+		}> = [];
+		var force:Bool = Context.defined("hl_force");
+
+		for (u in units) {
+			var dir:String = Path.join([absOut, "hdll", u.name]);
+			ensureDir(dir);
+
+			var xml:String = hdllXml(u, cacheDir != null);
+			File.saveContent(Path.join([dir, "Build.xml"]), xml);
+
+			var hdllFile:String = Path.join([dir, "out", u.name + ".hdll"]);
+			var stampFile:String = Path.join([dir, ".stamp"]);
+			var parts:Array<String> = [
+				xml,
+				os,
+				arch,
+				folder,
+				statLine(hlLibFile),
+				Context.defined("hl_fast") ? "fast" : "release"
+			];
+			var stamp:String = haxe.crypto.Md5.encode(parts.concat(u.stamp).join("\n"));
+
+			results.push(hdllFile);
+			if (!force && FileSystem.exists(hdllFile) && FileSystem.exists(stampFile) && File.getContent(stampFile) == stamp) {
+				info('hdll "${u.name}" is up to date.');
+				continue;
+			}
+			if (FileSystem.exists(stampFile))
+				FileSystem.deleteFile(stampFile);
+			var objDir:String = Path.join([dir, "obj"]);
+			if (FileSystem.exists(objDir)) {
+				try {
+					deleteDirectoryRecursive(objDir);
+				} catch (e:Dynamic) {}
+			}
+			stale.push({
+				u: u,
+				dir: dir,
+				hdll: hdllFile,
+				stamp: stamp,
+				stampFile: stampFile
+			});
+		}
+
+		if (stale.length == 0)
+			return results;
+
+		var jobs:Int = 4;
+		var jv:String = Context.definedValue("hl_jobs");
+		if (jv != null && Std.parseInt(jv) != null)
+			jobs = Std.parseInt(jv);
+		jobs = Std.int(Math.min(jobs, stale.length));
+
+		if (jobs <= 1) {
+			for (s in stale) {
+				info('Building hdll "${s.u.name}"...');
+				compileBuildXml(absOut, "Build.xml", s.dir, cacheDir);
+			}
+		} else {
+			info('Building ${stale.length} hdlls (${stale.map(s -> s.u.name).join(", ")}) with $jobs parallel jobs...');
+			var outputs:Array<{code:Int, output:String}> = runHxcppParallel(stale.map(s -> s.dir), cacheDir, jobs);
+			var failed:Bool = false;
+			for (i in 0...stale.length) {
+				if (outputs[i].code != 0) {
+					failed = true;
+					Sys.println('--- hdll "${stale[i].u.name}" failed (exit code ${outputs[i].code}) ---');
+					Sys.println(outputs[i].output);
+				}
+			}
+			if (failed)
+				fail('One or more hdlls failed to build.');
+		}
+
+		for (s in stale) {
+			if (!FileSystem.exists(s.hdll))
+				fail('hxcpp did not produce ${s.hdll}');
+			File.saveContent(s.stampFile, s.stamp);
+		}
+		return results;
+	}
+
+	static function runHxcppParallel(dirs:Array<String>, cacheDir:String, limit:Int):Array<{code:Int, output:String}> {
+		var results:Array<{code:Int, output:String}> = [for (d in dirs) null];
+
+		var hxArgs:Array<String> = hxcppArgs("Build.xml", cacheDir, null);
+		hxArgs.push("-DHXCPP_CACHE_MB=0");
+		var hx:String = ["haxelib", "run", "hxcpp"].concat(hxArgs.map(quoteIfNeeded)).join(" ");
+		var windows:Bool = Sys.systemName() == "Windows";
+
+		var next:Int = 0;
+		while (next < dirs.length) {
+			var wave:Array<{index:Int, proc:Process, log:String}> = [];
+			while (wave.length < limit && next < dirs.length) {
+				var i:Int = next++;
+				var log:String = Path.join([dirs[i], "build.log"]);
+				var cmd:String = windows ? 'cd /d "${dirs[i]}" && $hx > "$log" 2>&1' : 'cd "${dirs[i]}" && $hx > "$log" 2>&1';
+				try {
+					wave.push({index: i, proc: windows ? new Process("cmd", ["/c", cmd]) : new Process("sh", ["-c", cmd]), log: log});
+				} catch (e:Dynamic) {
+					results[i] = {code: -1, output: 'Could not start hxcpp: $e'};
+				}
+			}
+			for (w in wave) {
+				var code:Int = w.proc.exitCode();
+				w.proc.close();
+				results[w.index] = {code: code, output: FileSystem.exists(w.log) ? File.getContent(w.log) : ""};
+			}
+		}
+		return results;
+	}
+
+	static function hdllExportedPrims(path:String):Array<String> {
+		var out:Array<String> = [];
+		if (os == "Windows") {
+			for (e in readExports(path))
+				if (e.startsWith("hlp_"))
+					out.push(e.substr(4));
+			return out;
+		}
+		try {
+			var proc:Process = new Process("nm", os == "Mac" ? ["-gU", path] : ["-D", "--defined-only", path]);
+			var text:String = proc.stdout.readAll().toString();
+			proc.exitCode();
+			proc.close();
+			var re:EReg = ~/[ ]_?hlp_([A-Za-z0-9_]+)/;
+			for (line in text.split("\n"))
+				if (re.match(line))
+					out.push(re.matched(1));
+		} catch (e:Dynamic) {
+			return null;
+		}
+		return out;
+	}
+
+	static function checkVmNatives(bytecode:String, buildDir:String):Void {
+		var natives:Array<HlNative>;
+		try {
+			natives = HlBytecode.readNatives(File.getBytes(bytecode));
+		} catch (e:Dynamic) {
+			info('Could not read the native table of $bytecode ($e): the check for missing hdlls was skipped.');
+			return;
+		}
+
+		var byLib:Map<String, Array<HlNative>> = new Map();
+		var libs:Array<String> = [];
+		for (n in natives) {
+			if (n.lib == "std" || n.lib == "builtin")
+				continue;
+			if (!byLib.exists(n.lib)) {
+				byLib.set(n.lib, []);
+				libs.push(n.lib);
+			}
+			byLib.get(n.lib).push(n);
+		}
+
+		var problems:Int = 0;
+		for (lib in libs) {
+			var fns:Array<HlNative> = byLib.get(lib);
+			var required:Array<HlNative> = fns.filter(f -> !f.optional);
+			var file:String = Path.join([buildDir, lib + "64.hdll"]);
+			if (!FileSystem.exists(file))
+				file = Path.join([buildDir, lib + ".hdll"]);
+
+			if (!FileSystem.exists(file)) {
+				if (required.length == 0)
+					continue;
+				problems++;
+				var sample:String = required.slice(0, 3).map(f -> f.name).join(", ") + (required.length > 3 ? ", ..." : "");
+				info('Warning: the program needs "$lib.hdll" (${required.length} function(s): $sample) but it was not built or found.\n'
+					+ '  Put a prebuilt one in hdlls/dynamic/$folder, or provide it with an hl_module.xml whose name is "$lib".');
+				continue;
+			}
+
+			var prims:Array<String> = hdllExportedPrims(file);
+			if (prims == null)
+				continue;
+			var missing:Array<String> = [for (f in required) if (prims.indexOf(f.name) < 0) f.name];
+			if (missing.length > 0) {
+				problems++;
+				info('Warning: ${Path.withoutDirectory(file)} does not export ${missing.length} function(s) the program needs: ${missing.slice(0, 5).join(", ")}'
+					+ (missing.length > 5 ? ", ..." : "")
+					+ '.\n  Each one needs HL_PRIM + DEFINE_PRIM in the hdll source (see "Modules" in the README).');
+			}
+		}
+
+		if (problems > 0 && Context.defined("hl_strict_natives"))
+			fail('$problems native library problem(s) found (-D hl_strict_natives is set).');
+	}
+
+	static function buildVm(projectPath:String, outputDir:String):Void {
+		var absOut:String = Path.isAbsolute(outputDir) ? outputDir : Path.join([projectPath, outputDir]);
+		var buildDir:String = Path.join([absOut, "build", folder]);
+		ensureDir(buildDir);
+
+		info('VM mode: bytecode on the precompiled HashLink VM, native code in hdlls.');
+		var vm:String = ensureVm();
+
+		var nativeLibs:NativeLibs = resolveNativeLibs(projectPath);
+		if (nativeLibs.statics.length > 0)
+			info('Static libs are ignored in VM mode (hdlls are loaded at run time): ' + nativeLibs.statics.map(l -> l.fileName).join(", "));
+
+		var built:Array<String> = buildHdllUnits(collectHdllUnits(projectPath, absOut), absOut, resolveCacheDir(absOut));
+
+		var exePath:String = Path.join([buildDir, exeFileName()]);
+		if (copyIfChanged(vm, exePath))
+			makeExecutable(exePath);
+
+		var bytecode:String = Compiler.getOutput();
+		if (!Path.isAbsolute(bytecode))
+			bytecode = Path.join([projectPath, bytecode]);
+		copyIfChanged(bytecode, Path.join([buildDir, "hlboot.dat"]));
+
+		copyHdlls(projectPath, outputDir);
+		for (h in built)
+			copyIfChanged(h, Path.join([buildDir, Path.withoutDirectory(h)]));
+		copyModuleFiles(outputDir);
+		checkVmNatives(bytecode, buildDir);
+
+		info('VM ready: ${Path.join([outputDir, "build", folder, exeFileName()])} (runs hlboot.dat)');
+	}
+
 	static function getHaxelibPath():String {
 		var proc:Process = new Process("haxelib", ["path", "hl_compile"]);
 		var lines:Array<String> = proc.stdout.readAll().toString().split("\n");
 		proc.close();
-		return Path.normalize(StringTools.trim(lines[1]));
+		return Path.normalize(StringTools.trim(lines[2]));
 	}
 
 	static inline function info(msg:String):Void {

@@ -1,0 +1,6 @@
+answer=42
+inj=8
+mul=6
+nat=42
+null=null
+apply=42

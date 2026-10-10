@@ -149,6 +149,56 @@
         </section>
     </files>
 
+    <files id="vm_sources">
+        <depend name="${HL_INCLUDE}/hl.h" />
+
+        <file name="${HL_SRC}/code.c" />
+        <file name="${HL_SRC}/jit.c" />
+        <file name="${HL_SRC}/jit_emit.c" />
+        <file name="${HL_SRC}/jit_regs.c" />
+        <file name="${HL_SRC}/jit_x86_64.c" />
+        <file name="${HL_SRC}/jit_dump.c" />
+        <file name="vm/launcher.c" />
+        <file name="${HL_SRC}/module.c" />
+        <file name="${HL_SRC}/debugger.c" />
+        <file name="${HL_SRC}/profile.c" />
+
+        <compilerflag value="-I${HL_INCLUDE}" />
+
+        <section if="windows">
+            <compilerflag value="-D_CRT_SECURE_NO_WARNINGS" />
+        </section>
+
+        <section if="linux">
+            <compilerflag value="-fno-omit-frame-pointer" />
+            <compilerflag value="-pthread" />
+        </section>
+
+        <section if="mac">
+            <section unless="HXCPP_ARM64">
+                <file name="${HL_ROOT}/include/mdbg/mdbg.c" />
+                <file name="${HL_ROOT}/include/mdbg/mach_excServer.c" />
+                <file name="${HL_ROOT}/include/mdbg/mach_excUser.c" />
+            </section>
+        </section>
+    </files>
+
+    <!-- The unmodified HashLink main, renamed so vm/launcher.c can be the real entry point. -->
+    <files id="vm_main">
+        <depend name="${HL_INCLUDE}/hl.h" />
+        <file name="${HL_SRC}/main.c" />
+        <compilerflag value="-I${HL_INCLUDE}" />
+        <compilerflag value="-Dmain=hl_vm_main" />
+        <compilerflag value="-Dwmain=hl_vm_main" />
+        <section if="windows">
+            <compilerflag value="-D_CRT_SECURE_NO_WARNINGS" />
+        </section>
+        <section if="linux">
+            <compilerflag value="-fno-omit-frame-pointer" />
+            <compilerflag value="-pthread" />
+        </section>
+    </files>
+
     <set name="OUT_ARCH" value="unknown" />
 
     <section if="windows">
@@ -231,6 +281,49 @@
 
             <files id="hashlink_sources" />
             <files id="pcre_sources" />
+        </target>
+    </section>
+
+    <!-- The precompiled VM used by the bytecode mode: haxelib run hxcpp BuildHashlink.xml vm -->
+    <section if="windows">
+        <target id="vm" tool="linker" toolid="exe" output="hl">
+            <ext value=".exe" />
+            <outdir name="libs/${OUT_ARCH}" />
+
+            <files id="vm_sources" />
+            <files id="vm_main" />
+
+            <lib name="libs/${OUT_ARCH}/libhl.lib" />
+            <lib name="winmm.lib" />
+            <lib name="user32.lib" />
+            <lib name="dbghelp.lib" />
+            <lib name="psapi.lib" />
+        </target>
+    </section>
+
+    <section unless="windows || emscripten">
+        <target id="vm" tool="linker" toolid="exe" output="hl">
+            <ext value="" />
+            <outdir name="libs/${OUT_ARCH}" />
+
+            <files id="vm_sources" />
+            <files id="vm_main" />
+
+            <section if="mac">
+                <lib name="-Wl,-force_load,libs/${OUT_ARCH}/hl.lib" />
+                <lib name="-Wl,-export_dynamic" />
+                <lib name="-Wl,-rpath,@executable_path" />
+            </section>
+            <section unless="mac">
+                <lib name="-Wl,--whole-archive" />
+                <lib name="libs/${OUT_ARCH}/hl.lib" />
+                <lib name="-Wl,--no-whole-archive" />
+                <lib name="-rdynamic" />
+                <lib name="-Wl,-rpath,$ORIGIN" />
+            </section>
+            <lib name="-lm" />
+            <lib name="-lpthread" if="linux" />
+            <lib name="-ldl" if="linux" />
         </target>
     </section>
 </xml>

@@ -1,0 +1,4 @@
+--library hl_compile
+-cp ../fw/src
+--hl bin/main.hl
+--main Main

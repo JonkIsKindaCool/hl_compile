@@ -1,0 +1,8 @@
+<hlmodule name="hlfw">
+  <requires hl_compile="1.4.0" />
+  <files>
+    <compilerflag value="-I${HLMODULE_DIR}/native" />
+    <file name="native/fw.c" />
+  </files>
+  <copy from="assets" to="assets" />
+</hlmodule>
