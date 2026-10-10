@@ -85,10 +85,6 @@
 
         <section if="windows">
             <compilerflag value="-D_CRT_SECURE_NO_WARNINGS" />
-
-            <section if="HXCPP_M64">
-                <compilerflag value="-DHL_64" />
-            </section>
             <section unless="HXCPP_M64">
                 <error value="HashLink on Windows requires 64 bits. Compile with: haxelib run hxcpp BuildHashlink.xml -DHXCPP_M64" />
             </section>
@@ -96,51 +92,29 @@
 
         <section if="linux">
             <compilerflag value="-DHL_LINUX" />
-            <section if="HXCPP_M64">
-                <compilerflag value="-DHL_64" />
-            </section>
             <section if="HXCPP_M32">
                 <compilerflag value="-m32" />
                 <linkerflag value="-m32" />
-            </section>
-            <section if="HXCPP_ARM64">
-                <compilerflag value="-DHL_64" />
             </section>
         </section>
 
         <section if="mac">
             <compilerflag value="-DHL_MAC" />
-            <section if="HXCPP_M64">
-                <compilerflag value="-DHL_64" />
-            </section>
-            <section if="HXCPP_ARM64">
-                <compilerflag value="-DHL_64" />
-            </section>
         </section>
 
         <section if="iphoneos">
             <compilerflag value="-DHL_IOS" />
             <compilerflag value="-DHL_MAC" />
-            <section if="HXCPP_ARM64">
-                <compilerflag value="-DHL_64" />
-            </section>
         </section>
 
         <section if="iphonesim">
             <compilerflag value="-DHL_IOS" />
             <compilerflag value="-DHL_MAC" />
-            <compilerflag value="-DHL_64" />
         </section>
 
         <section if="android">
             <compilerflag value="-DHL_ANDROID" />
             <compilerflag value="-DHL_LINUX" />
-            <section if="HXCPP_ARM64">
-                <compilerflag value="-DHL_64" />
-            </section>
-            <section if="HXCPP_M64">
-                <compilerflag value="-DHL_64" />
-            </section>
         </section>
 
         <section if="emscripten">

@@ -1,6 +1,7 @@
 #define HL_NAME(n) hlfw_##n
-#include <hl.h>
 #include "fw.h"
+
+#include <hl.h>
 
 int fw_answer(void) { return FW_ANSWER; }
 
